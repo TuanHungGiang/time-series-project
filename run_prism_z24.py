@@ -10,6 +10,7 @@ from the same long recording.
 """
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,8 @@ p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--max_train_batches", type=int, default=0, help="debug: limit batches per epoch")
 p.add_argument("--log_every", type=int, default=10, help="print training progress every N batches")
+p.add_argument("--lr_schedule", choices=["halve", "constant", "cosine"], default="halve",
+               help="halve = PRISM default (lr/2 every epoch); constant; cosine decay over --epochs")
 p.add_argument("--gpus", type=int, default=0,
                help="number of GPUs to use with DataParallel (0 = all visible GPUs)")
 p.add_argument("--out", default=str(ROOT / "results"))
@@ -104,7 +107,7 @@ def evaluate(ids):
 
 out_dir = Path(args.out)
 out_dir.mkdir(exist_ok=True)
-tag = f"prism_{args.split}_seed{args.seed}"
+tag = f"prism_{args.split}_{args.lr_schedule}_seed{args.seed}"
 best = {"val_loss": np.inf}
 bad = 0
 n_batches = -(-len(tr) // args.batch_size)  # ceil
@@ -114,7 +117,12 @@ print(f"[4/4] training: up to {args.epochs} epochs, {n_batches} batches/epoch, "
       f"early-stop patience {args.patience}", flush=True)
 t_start = time.time()
 for ep in range(args.epochs):
-    lr = args.lr * (0.5 ** ep)  # PRISM's 'type1' schedule: halve every epoch
+    if args.lr_schedule == "constant":
+        lr = args.lr
+    elif args.lr_schedule == "cosine":
+        lr = 0.5 * args.lr * (1 + math.cos(math.pi * ep / args.epochs))
+    else:
+        lr = args.lr * (0.5 ** ep)  # PRISM's 'type1' schedule: halve every epoch
     for g in opt.param_groups:
         g["lr"] = lr
     net.train()
@@ -159,7 +167,7 @@ from sklearn.metrics import f1_score, confusion_matrix  # noqa: E402
 
 f1 = float(f1_score(y[te], preds, average="macro"))
 cm = confusion_matrix(y[te], preds, labels=list(range(cfg.num_class)))
-res = {"split": args.split, "seed": args.seed, "params": n_params, "best_epoch": best["epoch"],
+res = {"split": args.split, "lr_schedule": args.lr_schedule, "batch_size": args.batch_size, "seed": args.seed, "params": n_params, "best_epoch": best["epoch"],
        "val_acc": best["val_acc"], "test_acc": te_acc, "test_macro_f1": f1,
        "n_train": len(tr), "n_val": len(va), "n_test": len(te)}
 print(json.dumps(res), flush=True)

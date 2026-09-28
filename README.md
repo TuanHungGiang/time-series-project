@@ -57,5 +57,13 @@ compute-bound; expect a modest speed-up from the second GPU, not 2x.
 
 ## Notes
 
-PRISM's default schedule halves the learning rate every epoch. On this dataset that leaves the model
-under-fitted (training loss stays close to ln 17), so treat the default-schedule numbers as a baseline only.
+PRISM's default schedule halves the learning rate every epoch (`--lr_schedule halve`, the default). On this
+dataset that leaves the model under-fitted (training loss stays close to ln 17, test accuracy near chance), so
+treat the default-schedule numbers as a baseline only. Alternatives:
+
+```bash
+python run_prism_z24.py --split setup --batch_size 32 --lr_schedule constant --epochs 60 --patience 15
+python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --epochs 60 --patience 60
+```
+
+Result files include the schedule in their name, e.g. `results/prism_setup_constant_seed0.json`.
