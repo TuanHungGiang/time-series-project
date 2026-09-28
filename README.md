@@ -27,8 +27,30 @@ pip install -r requirements.txt
 python run_prism_z24.py --split setup
 ```
 
-Results go to `results/` (`.json` metrics, `_confusion.npy`, `.pt` best checkpoint).
-`--log_every N` controls how often batch progress is printed.
+`--log_every N` controls how often batch progress is printed. Everything is written to
+`results/<run name>/` (see "Pipeline and outputs").
+
+## Pipeline and outputs
+
+1. **Data**: each original 60000-sample recording is already cut into 10 segments of 6000 samples
+   (1530 = 17 scenarios x 9 setups x 10 segments), see "Splits" above.
+2. **Normalisation** (`--norm robust`, default): per channel, subtract the median and divide by the median
+   per-sample std, then clip to +-10. Statistics come from the training set only. The raw data has huge spikes
+   (a global std is ~10x the typical per-sample std), so a plain global z-score (`--norm zscore`) shrinks the
+   signal. Clipping is `--clip`.
+3. **Augmentation** (training set only, on the fly, one transform per sample per epoch; `--no_augment` turns it
+   off): Gaussian noise 40%, time reversal 30%, random crop 10%, time warp 10%, circular shift 10%.
+   Warping and resizing change frequencies, and damage shows up as small frequency shifts, so keep `--aug_warp`
+   small and compare against `--no_augment`.
+4. **Training / selection**: the checkpoint with the lowest *validation* loss is used; test data is only reported.
+5. **Report** (`metrics.json`, printed in the log): accuracy, balanced accuracy, precision / recall / F1 (macro and
+   weighted, plus per class), ROC-AUC (one-vs-rest), top-3 accuracy, Cohen's kappa, MCC.
+6. **Figures**: `training_curves.png` (train/val loss, accuracy, lr), `confusion_matrix.png` (counts and
+   normalised), `roc_curve.png` (per class + macro/micro), `tsne_2d.png` (coloured by scenario and by setup) and
+   `tsne_3d.png`, computed on the 128-d PRISM embeddings of the test set. Raw predictions, embeddings and history
+   are saved as `.npz` / `.json` so figures can be redrawn.
+
+Run folder name: `prism_<split>_<lr_schedule>_<aug|noaug>_seed<seed>`.
 
 ## Run on Kaggle
 
@@ -66,4 +88,4 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule constant --e
 python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --epochs 60 --patience 60
 ```
 
-Result files include the schedule in their name, e.g. `results/prism_setup_constant_seed0.json`.
+Ablation without augmentation: add `--no_augment`.
