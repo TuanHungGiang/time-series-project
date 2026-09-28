@@ -1,0 +1,13 @@
+# data and third-party code are fetched at run time, never committed
+Z24-dataset-processed/
+PRISM/
+
+# outputs
+results/
+results_*/
+*.log
+*.pt
+*.npy
+__pycache__/
+.ipynb_checkpoints/
+.claude/
