@@ -32,6 +32,8 @@ p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--max_train_batches", type=int, default=0, help="debug: limit batches per epoch")
 p.add_argument("--log_every", type=int, default=10, help="print training progress every N batches")
+p.add_argument("--gpus", type=int, default=0,
+               help="number of GPUs to use with DataParallel (0 = all visible GPUs)")
 p.add_argument("--out", default=str(ROOT / "results"))
 args = p.parse_args()
 
@@ -67,7 +69,14 @@ cfg = SimpleNamespace(task_name="classification", seq_len=X.shape[2], enc_in=X.s
                       num_class=int(y.max()) + 1, d_model=128, dropout=0.1)
 model = Model(cfg).to(dev)
 n_params = sum(p.numel() for p in model.parameters())
-print(f"[3/4] PRISM params: {n_params/1e6:.2f}M  device={dev}", flush=True)
+n_gpu = torch.cuda.device_count() if dev.type == "cuda" else 0
+if args.gpus:
+    n_gpu = min(args.gpus, n_gpu)
+# DataParallel splits each batch across GPUs; `model` stays the unwrapped module so checkpoints have clean keys
+net = nn.DataParallel(model, device_ids=list(range(n_gpu))) if n_gpu > 1 else model
+gpu_names = ", ".join(torch.cuda.get_device_name(i) for i in range(n_gpu)) if n_gpu else "cpu"
+print(f"[3/4] PRISM params: {n_params/1e6:.2f}M  device={dev}  gpus={max(n_gpu, 1)} ({gpu_names})  "
+      f"batch {args.batch_size} total -> {args.batch_size // max(n_gpu, 1)} per GPU", flush=True)
 
 opt = torch.optim.RAdam(model.parameters(), lr=args.lr)
 crit = nn.CrossEntropyLoss()
@@ -83,10 +92,10 @@ def batches(ids, bs, shuffle):
 
 @torch.no_grad()
 def evaluate(ids):
-    model.eval()
+    net.eval()
     loss, preds = 0.0, []
     for xb, yb in batches(ids, 32, False):
-        out = model(xb)
+        out = net(xb)
         loss += crit(out, yb).item() * len(yb)
         preds.append(out.argmax(1).cpu())
     preds = torch.cat(preds).numpy()
@@ -108,11 +117,11 @@ for ep in range(args.epochs):
     lr = args.lr * (0.5 ** ep)  # PRISM's 'type1' schedule: halve every epoch
     for g in opt.param_groups:
         g["lr"] = lr
-    model.train()
+    net.train()
     t0, tl, nb = time.time(), 0.0, 0
     for xb, yb in batches(tr, args.batch_size, True):
         opt.zero_grad()
-        loss = crit(model(xb), yb)
+        loss = crit(net(xb), yb)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=4.0)
         opt.step()

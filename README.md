@@ -42,6 +42,19 @@ kaggle kernels status <username>/z24-prism
 kaggle kernels output <username>/z24-prism -p kaggle_out
 ```
 
+## Multi-GPU (Kaggle T4 x2)
+
+If more than one GPU is visible, `run_prism_z24.py` wraps the model in `torch.nn.DataParallel` automatically
+(`--gpus N` limits how many). `--batch_size` is the total batch and is split across GPUs, so with two T4s use
+`--batch_size 32` to keep 16 samples per GPU:
+
+```bash
+python run_prism_z24.py --split setup --batch_size 32
+```
+
+PRISM is tiny (0.1M parameters) and runs one small convolution per channel, so it is launch-bound rather than
+compute-bound; expect a modest speed-up from the second GPU, not 2x.
+
 ## Notes
 
 PRISM's default schedule halves the learning rate every epoch. On this dataset that leaves the model
