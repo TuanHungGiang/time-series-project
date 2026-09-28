@@ -2,15 +2,15 @@
 
 Kaggle settings needed: GPU on, Internet on.
 If the GitHub repo is private, add a Kaggle secret named GITHUB_TOKEN (read access to the repo).
-Results (json, confusion matrices, checkpoints) end up in /kaggle/working/z24-prism/results.
+Results (json, confusion matrices, checkpoints) end up in /kaggle/working/time-series-project/results.
 """
 import os
 import subprocess
 import sys
 
-GH_REPO = "TuanHungGiang/z24-prism"
+GH_REPO = "TuanHungGiang/time-series-project"
 WORK = "/kaggle/working"
-REPO_DIR = f"{WORK}/z24-prism"
+REPO_DIR = f"{WORK}/time-series-project"
 
 
 def sh(cmd, **kw):
