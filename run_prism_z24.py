@@ -1,4 +1,4 @@
-"""Train PRISM (full 6000-sample sequences, no compression) on the processed Z24 dataset.
+"""Train a classifier (PRISM or a sequence model from models_seq.py) on full 6000-sample sequences of the Z24 dataset.
 
 Data: (1530, 27, 6000). Each original 60000-sample recording was already cut into 10 segments of 6000
 samples, so sample index = scenario*90 + setup*10 + segment (17 scenarios x 9 setups x 10 segments).
@@ -27,9 +27,15 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))  # for report.py, independent of how python was launched
 sys.path.insert(0, str(ROOT / "PRISM"))
-from models.PRISM import Model  # noqa: E402
+from models_seq import MODEL_NAMES, build_model  # noqa: E402
 
 p = argparse.ArgumentParser()
+p.add_argument("--model", choices=MODEL_NAMES, default="prism",
+               help="prism (CNN, reference) | ms4n (S4D state-space) | gru | lstm | cnn_lstm | transformer")
+p.add_argument("--hidden", type=int, default=None, help="model width (default: 64)")
+p.add_argument("--layers", type=int, default=None, help="depth (defaults: ms4n 1, gru/lstm 2, transformer 3)")
+p.add_argument("--stem_stride", type=int, default=None,
+               help="gru/lstm only: stride of the learned conv stem (default 5; 1 = no length reduction, slow)")
 p.add_argument("--split", choices=["segment", "setup"], default="setup")
 p.add_argument("--epochs", type=int, default=200)
 p.add_argument("--patience", type=int, default=10)
@@ -95,7 +101,7 @@ yt = torch.from_numpy(y)
 
 cfg = SimpleNamespace(task_name="classification", seq_len=X.shape[2], enc_in=X.shape[1],
                       num_class=n_cls, d_model=128, dropout=0.1)
-model = Model(cfg).to(dev)
+model = build_model(args.model, cfg, args).to(dev)
 n_params = sum(p.numel() for p in model.parameters())
 n_gpu = torch.cuda.device_count() if dev.type == "cuda" else 0
 if args.gpus:
@@ -103,7 +109,7 @@ if args.gpus:
 # DataParallel splits each batch across GPUs; `model` stays the unwrapped module so checkpoints have clean keys
 net = nn.DataParallel(model, device_ids=list(range(n_gpu))) if n_gpu > 1 else model
 gpu_names = ", ".join(torch.cuda.get_device_name(i) for i in range(n_gpu)) if n_gpu else "cpu"
-print(f"[3/4] PRISM params: {n_params/1e6:.2f}M  device={dev}  gpus={max(n_gpu, 1)} ({gpu_names})  "
+print(f"[3/4] model {args.model}: {n_params/1e6:.3f}M params  device={dev}  gpus={max(n_gpu, 1)} ({gpu_names})  "
       f"batch {args.batch_size} total -> {args.batch_size // max(n_gpu, 1)} per GPU", flush=True)
 
 opt = torch.optim.RAdam(model.parameters(), lr=args.lr)
@@ -173,12 +179,12 @@ def evaluate(ids):
 
 @torch.no_grad()
 def embed(ids):
-    """128-d PRISM embedding (channel-averaged features before the linear classifier)."""
+    """Features right before the classifier head (used for t-SNE)."""
     model.eval()
-    return torch.cat([model.front(xb).mean(dim=1).cpu() for xb, _ in batches(ids, 32, False)]).numpy()
+    return torch.cat([model.embed(xb.transpose(1, 2)).cpu() for xb, _ in batches(ids, 32, False)]).numpy()
 
 
-tag = f"prism_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}_seed{args.seed}"
+tag = f"{args.model}_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}_seed{args.seed}"
 run_dir = Path(args.out) / tag
 run_dir.mkdir(parents=True, exist_ok=True)
 best = {"val_loss": np.inf}
@@ -252,7 +258,7 @@ _, _, val_pred, val_prob = evaluate(va)
 _, _, te_pred, te_prob = evaluate(te)
 m_val = compute_metrics(y[va], val_pred, val_prob, n_cls)
 m_te = compute_metrics(y[te], te_pred, te_prob, n_cls)
-res = {"split": args.split, "lr_schedule": args.lr_schedule, "augmentation": not args.no_augment, "norm": args.norm,
+res = {"model": args.model, "split": args.split, "lr_schedule": args.lr_schedule, "augmentation": not args.no_augment, "norm": args.norm,
        "batch_size": args.batch_size, "seed": args.seed, "params": n_params, "best_epoch": best["epoch"],
        "epochs_run": len(hist["train_loss"]), "n_train": len(tr), "n_val": len(va), "n_test": len(te),
        "val": {k: v for k, v in m_val.items() if k != "per_class"},

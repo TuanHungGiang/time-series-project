@@ -30,6 +30,30 @@ python run_prism_z24.py --split setup
 `--log_every N` controls how often batch progress is printed. Everything is written to
 `results/<run name>/` (see "Pipeline and outputs").
 
+## Models (`--model`)
+
+All models read the full 6000-step, 27-channel sequence (no resampling); see `models_seq.py`.
+
+| `--model` | what it is | size |
+|---|---|---|
+| `prism` | multi-resolution symmetric CNN + global pooling (reference, not a sequence model) | 0.105M |
+| `ms4n` | S4D state-space model following the MS4N description in arXiv:2605.27406: linear input projection, S4D FFT convolution, gated (GLU) channel mixing, LayerNorm, average pooling, MLP | 0.024M |
+| `gru`, `lstm` | learned strided-conv stem (`--stem_stride`, default 5 -> 1200 steps; this is a learned layer, not resampling) + 2-layer bidirectional RNN | 0.15M / 0.19M |
+| `cnn_lstm` | two conv+pool blocks + bidirectional LSTM (the 1DCNN-LSTM baseline family) | 0.087M |
+| `transformer` | patch embedding over all channels (patch 50, stride 25 -> 239 tokens) + 3-layer Transformer encoder | 0.20M |
+
+`ms4n` is a re-implementation from the paper text (no official code was found; S4D-Lin initialisation instead of the
+exact HiPPO-LegS eigenvalues), so treat it as "S4D-based MS4N-style", not as the authors' model.
+`--hidden` and `--layers` change width and depth. Example, all models on both splits:
+
+```bash
+for m in ms4n gru lstm cnn_lstm transformer prism; do
+  for s in segment setup; do
+    python -u run_prism_z24.py --model $m --split $s --batch_size 32 --lr_schedule constant --epochs 60 --patience 15
+  done
+done
+```
+
 ## Pipeline and outputs
 
 1. **Data**: each original 60000-sample recording is already cut into 10 segments of 6000 samples
@@ -50,7 +74,7 @@ python run_prism_z24.py --split setup
    `tsne_3d.png`, computed on the 128-d PRISM embeddings of the test set. Raw predictions, embeddings and history
    are saved as `.npz` / `.json` so figures can be redrawn.
 
-Run folder name: `prism_<split>_<lr_schedule>_<aug|noaug>_seed<seed>`.
+Run folder name: `<model>_<split>_<lr_schedule>_<aug|noaug>_seed<seed>`.
 
 ## Run on Kaggle
 
