@@ -38,16 +38,20 @@ All models read the full 6000-step, 27-channel sequence (no resampling); see `mo
 |---|---|---|
 | `prism` | multi-resolution symmetric CNN + global pooling (reference, not a sequence model) | 0.105M |
 | `ms4n` | S4D state-space model following the MS4N description in arXiv:2605.27406: linear input projection, S4D FFT convolution, gated (GLU) channel mixing, LayerNorm, average pooling, MLP | 0.024M |
+| `mamba` | Selective state-space model (Mamba / S6, Gu & Dao 2023-2024 - the architecture behind most 2024-2026 sequence SOTA); unlike S4D, `A, B, C, dt` depend on the input at every step. Implemented as a genuine step-by-step recurrence, not the authors' hardware-aware CUDA scan (no Linux/CUDA build assumed here) | ~0.1M |
 | `gru`, `lstm` | learned strided-conv stem (`--stem_stride`, default 5 -> 1200 steps; this is a learned layer, not resampling) + 2-layer bidirectional RNN | 0.15M / 0.19M |
 | `cnn_lstm` | two conv+pool blocks + bidirectional LSTM (the 1DCNN-LSTM baseline family) | 0.087M |
 | `transformer` | patch embedding over all channels (patch 50, stride 25 -> 239 tokens) + 3-layer Transformer encoder | 0.20M |
 
-`ms4n` is a re-implementation from the paper text (no official code was found; S4D-Lin initialisation instead of the
-exact HiPPO-LegS eigenvalues), so treat it as "S4D-based MS4N-style", not as the authors' model.
-`--hidden` and `--layers` change width and depth. Example, all models on both splits:
+`ms4n` and `mamba` are re-implementations from published equations (no official/practical-to-install code was
+found for either on this stack), so treat them as "S4D-style" / "selective-scan-style", not as the authors' exact
+model. `mamba`'s Python-loop scan gets disproportionately slower as its effective sequence length grows (see
+`models_seq.py`'s docstring for measurements), so its default `--stem_stride` (25) is higher than `gru`/`lstm`'s (5)
+-- lower it only if you have time to spare. `--hidden` and `--layers` change width and depth. Example, all models
+on both splits:
 
 ```bash
-for m in ms4n gru lstm cnn_lstm transformer prism; do
+for m in ms4n mamba gru lstm cnn_lstm transformer prism; do
   for s in segment setup; do
     python -u run_prism_z24.py --model $m --split $s --batch_size 32 --lr_schedule constant --epochs 60 --patience 15
   done
