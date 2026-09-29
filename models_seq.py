@@ -222,7 +222,10 @@ class PatchTransformer(nn.Module):
 
     def embed(self, x):                                                      # x: (B, L, C)
         p = x.unfold(1, self.patch, self.stride).flatten(2)                  # (B, n_tok, C*patch)
-        h = self.enc(self.patch_embed(p) + self.pos)
+        # n_tok can be shorter than at construction time (e.g. --train_window uses a shorter train sequence
+        # than the eval one); the position embedding was sized for the longer of the two, so slice it down.
+        pos = self.pos[:, :p.size(1)]
+        h = self.enc(self.patch_embed(p) + pos)
         return self.norm(h).mean(dim=1)
 
     def forward(self, x):

@@ -9,8 +9,13 @@ Splits are made by group instead of randomly to avoid leakage between segments o
   --split setup   : setups 0-5 train / 6 val / 7-8 test (unseen measurement setups; strict)
 
 Pipeline: normalise per channel with train statistics -> augment the TRAIN set only (on the fly, every epoch) ->
-train PRISM -> report accuracy / precision / recall / F1 / ROC-AUC and save figures (loss curves, confusion
-matrix, ROC, t-SNE 2D and 3D) for the checkpoint with the best validation loss.
+train -> report accuracy / precision / recall / F1 / ROC-AUC and save figures (loss curves, confusion matrix,
+ROC, t-SNE 2D and 3D) for the checkpoint with the best validation loss.
+
+--train_window N additionally splits each sample along the TIME axis: train samples use only their first N
+steps (then augmented), val/test samples use their remaining, later steps instead. --split still decides
+which SAMPLES (recordings) are train/val/test, so this adds no cross-sample leakage; it tests whether
+training on a short augmented snippet generalises to a longer, later portion of different recordings.
 """
 import argparse
 import json
@@ -50,6 +55,12 @@ p.add_argument("--seq_mode", choices=["crop", "downsample"], default="crop",
                     "short but not distorted); downsample: N points evenly spaced across the full 6000 "
                     "(same duration, lower sample rate - aliases any frequency content above the new "
                     "Nyquist limit, i.e. it can distort the signal, not just shrink it)")
+p.add_argument("--train_window", type=int, default=0,
+               help="if >0, TRAIN samples use only their first N time steps (then augmented); VAL/TEST "
+                    "samples use their remaining, later time steps instead (0 = disabled: everyone uses the "
+                    "same, full-length signal). Which SAMPLES are train/val/test is still decided by --split, "
+                    "so this does not add cross-sample leakage; it tests whether training on a short "
+                    "augmented snippet generalises to a longer, later portion of different recordings.")
 p.add_argument("--norm", choices=["robust", "zscore"], default="robust",
                help="robust: per-channel median / median per-sample std (+clip); zscore: global mean/std")
 p.add_argument("--clip", type=float, default=10.0, help="clip normalised values to +-clip (robust norm only; 0 = off)")
@@ -94,27 +105,45 @@ else:
 tr, va, te = np.where(tr)[0], np.where(va)[0], np.where(te)[0]
 print(f"split={args.split} train={len(tr)} val={len(va)} test={len(te)}", flush=True)
 
-# normalisation with TRAIN statistics only
+# optional time-axis train/eval split: train samples see only the head, val/test samples only the tail
+if args.train_window:
+    tw = args.train_window
+    assert 0 < tw < X.shape[2], f"--train_window must be in (0, {X.shape[2]})"
+    X_train_src, X_eval_src = X[:, :, :tw], X[:, :, tw:]
+    print(f"      train window: first {tw} steps (train, augmented) | "
+          f"eval window: last {X.shape[2] - tw} steps (val/test, not augmented)", flush=True)
+else:
+    X_train_src = X_eval_src = X
+
+# normalisation with TRAIN statistics only, computed from the exact slice the model trains on
 print(f"[2/4] normalising per channel ({args.norm}, train statistics) ...", flush=True)
+Xtr = X_train_src[tr]
 if args.norm == "zscore":
-    mu = X[tr].mean(axis=(0, 2), keepdims=True)
-    sd = X[tr].std(axis=(0, 2), keepdims=True) + 1e-8
+    mu = Xtr.mean(axis=(0, 2), keepdims=True)
+    sd = Xtr.std(axis=(0, 2), keepdims=True) + 1e-8
 else:
     # a few huge spikes inflate the global std ~10x, so scale by the median per-sample std instead
-    Xtr = X[tr]
     mu = np.median(Xtr[:, :, ::10], axis=(0, 2))[None, :, None].astype(np.float32)
     sd = (np.median(Xtr.std(axis=2), axis=0)[None, :, None] + 1e-12).astype(np.float32)
-    del Xtr
-X = (X - mu) / sd
-if args.norm == "robust" and args.clip > 0:
-    np.clip(X, -args.clip, args.clip, out=X)
-X = X.astype(np.float32, copy=False)
-print(f"      typical per-sample/channel std after normalisation: {np.median(X[tr[:200]].std(axis=2)):.3f}", flush=True)
-Xt = torch.from_numpy(X)
+del Xtr
+
+
+def _norm(A):
+    A = (A - mu) / sd
+    if args.norm == "robust" and args.clip > 0:
+        np.clip(A, -args.clip, args.clip, out=A)
+    return A.astype(np.float32, copy=False)
+
+
+X_train_src = _norm(X_train_src)
+X_eval_src = X_train_src if X_eval_src is X else _norm(X_eval_src)  # avoid a redundant full-array copy
+print(f"      typical per-sample/channel std after normalisation: "
+      f"{np.median(X_train_src[tr[:200]].std(axis=2)):.3f}", flush=True)
+Xt_train, Xt_eval = torch.from_numpy(X_train_src), torch.from_numpy(X_eval_src)
 yt = torch.from_numpy(y)
 
-cfg = SimpleNamespace(task_name="classification", seq_len=X.shape[2], enc_in=X.shape[1],
-                      num_class=n_cls, d_model=128, dropout=0.1)
+cfg = SimpleNamespace(task_name="classification", seq_len=max(X_train_src.shape[2], X_eval_src.shape[2]),
+                      enc_in=X.shape[1], num_class=n_cls, d_model=128, dropout=0.1)
 model = build_model(args.model, cfg, args).to(dev)
 n_params = sum(p.numel() for p in model.parameters())
 n_gpu = torch.cuda.device_count() if dev.type == "cuda" else 0
@@ -171,18 +200,19 @@ def augment(x):
     return out
 
 
-def batches(ids, bs, shuffle):
+def batches(ids, bs, shuffle, src):
     ids = np.random.permutation(ids) if shuffle else ids
     for i in range(0, len(ids), bs):
         b = ids[i:i + bs]
-        yield Xt[b].to(dev, non_blocking=True), yt[b].to(dev)  # (B, C, L), labels
+        yield src[b].to(dev, non_blocking=True), yt[b].to(dev)  # (B, C, L), labels
 
 
 @torch.no_grad()
 def evaluate(ids):
+    """Always reads from Xt_eval: val/test samples only ever use their (possibly windowed) eval slice."""
     net.eval()
     loss, preds, probs = 0.0, [], []
-    for xb, yb in batches(ids, 32, False):
+    for xb, yb in batches(ids, 32, False, Xt_eval):
         out = net(xb.transpose(1, 2))  # model expects (B, L, C)
         loss += crit(out, yb).item() * len(yb)
         preds.append(out.argmax(1).cpu())
@@ -193,12 +223,13 @@ def evaluate(ids):
 
 @torch.no_grad()
 def embed(ids):
-    """Features right before the classifier head (used for t-SNE)."""
+    """Features right before the classifier head (used for t-SNE); reads from Xt_eval, see evaluate()."""
     model.eval()
-    return torch.cat([model.embed(xb.transpose(1, 2)).cpu() for xb, _ in batches(ids, 32, False)]).numpy()
+    return torch.cat([model.embed(xb.transpose(1, 2)).cpu() for xb, _ in batches(ids, 32, False, Xt_eval)]).numpy()
 
 
-tag = f"{args.model}_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}_seed{args.seed}"
+tw_tag = f"_tw{args.train_window}" if args.train_window else ""
+tag = f"{args.model}_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}{tw_tag}_seed{args.seed}"
 run_dir = Path(args.out) / tag
 run_dir.mkdir(parents=True, exist_ok=True)
 best = {"val_loss": np.inf}
@@ -221,7 +252,7 @@ for ep in range(args.epochs):
         g["lr"] = lr
     net.train()
     t0, tl, nb, correct, seen = time.time(), 0.0, 0, 0, 0
-    for xb, yb in batches(tr, args.batch_size, True):
+    for xb, yb in batches(tr, args.batch_size, True, Xt_train):
         if not args.no_augment:
             xb = augment(xb)
         opt.zero_grad()

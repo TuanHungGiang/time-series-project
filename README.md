@@ -92,6 +92,24 @@ kaggle kernels status <username>/z24-prism
 kaggle kernels output <username>/z24-prism -p kaggle_out
 ```
 
+## Train on a short snippet, evaluate on the rest (`--train_window`)
+
+`--train_window N` splits every sample's time axis in two: **train** samples use only their first N steps
+(then augmented), while **val/test** samples use their *remaining* (later) steps instead. `--split` still
+decides which recordings are train/val/test, so this is not a new source of cross-sample leakage; it tests
+whether training on a short augmented snippet generalises to a longer, later portion of *different*
+recordings.
+
+```bash
+python run_prism_z24.py --model prism --split setup --train_window 1000   # train: first 1000 steps
+                                                                            # val/test: last 5000 steps
+```
+
+Normalisation statistics are computed from the train slice only (the exact data the model sees during
+training), then applied to both slices. Combine with `--seq_len` if you also want to shorten the recording
+overall before splitting it in two (e.g. `--seq_len 3000 --train_window 1000` -> train sees steps 0-999,
+val/test sees steps 1000-2999). Run names get a `_tw<N>` suffix when this is on.
+
 ## Shortening the sequence (`--seq_len`)
 
 `--seq_len N` (0 = full 6000, the default) uses only N time steps per sample, via `--seq_mode`:
