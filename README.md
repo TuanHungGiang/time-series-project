@@ -92,6 +92,21 @@ kaggle kernels status <username>/z24-prism
 kaggle kernels output <username>/z24-prism -p kaggle_out
 ```
 
+## Shortening the sequence (`--seq_len`)
+
+`--seq_len N` (0 = full 6000, the default) uses only N time steps per sample, via `--seq_mode`:
+- `crop` (default): keep the first N points - same sample rate, shorter duration, signal not distorted.
+- `downsample`: N points evenly spaced across the full recording - same duration, lower sample rate, which
+  aliases any frequency content above the new Nyquist limit instead of just discarding it.
+
+```bash
+python run_prism_z24.py --model transformer --split setup --seq_len 1000 --seq_mode crop
+```
+
+`visualize_z24.ipynb` plots the raw signals, the crop-vs-downsample comparison (waveform and power spectral
+density, showing the aliasing effect above), the label distribution, the average signal per scenario, and a
+t-SNE of spectral features coloured by scenario and by measurement setup.
+
 ## Multi-GPU (Kaggle T4 x2)
 
 If more than one GPU is visible, `run_prism_z24.py` wraps the model in `torch.nn.DataParallel` automatically

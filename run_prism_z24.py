@@ -43,6 +43,13 @@ p.add_argument("--batch_size", type=int, default=16)
 p.add_argument("--lr", type=float, default=1e-3)
 p.add_argument("--lr_schedule", choices=["halve", "constant", "cosine"], default="halve",
                help="halve = PRISM default (lr/2 every epoch); constant; cosine decay over --epochs")
+p.add_argument("--seq_len", type=int, default=0,
+               help="use only this many time steps per sample (0 = all 6000); see --seq_mode")
+p.add_argument("--seq_mode", choices=["crop", "downsample"], default="crop",
+               help="crop: keep the first N points (same sample rate, shorter duration - the signal is cut "
+                    "short but not distorted); downsample: N points evenly spaced across the full 6000 "
+                    "(same duration, lower sample rate - aliases any frequency content above the new "
+                    "Nyquist limit, i.e. it can distort the signal, not just shrink it)")
 p.add_argument("--norm", choices=["robust", "zscore"], default="robust",
                help="robust: per-channel median / median per-sample std (+clip); zscore: global mean/std")
 p.add_argument("--clip", type=float, default=10.0, help="clip normalised values to +-clip (robust norm only; 0 = off)")
@@ -67,6 +74,13 @@ data_dir = ROOT / "Z24-dataset-processed"
 print("[1/4] loading inputs.npy (~1 GB) ...", flush=True)
 X = np.load(data_dir / "inputs.npy")  # (1530, 27, 6000) float32
 y = np.load(data_dir / "labels.npy").astype(np.int64)
+if args.seq_len and args.seq_len < X.shape[2]:
+    if args.seq_mode == "crop":
+        X = X[:, :, :args.seq_len]
+    else:
+        t_idx = np.linspace(0, X.shape[2] - 1, args.seq_len).round().astype(int)
+        X = X[:, :, t_idx]
+    print(f"      seq_len: 6000 -> {X.shape[2]} ({args.seq_mode})", flush=True)
 N = len(y)
 n_cls = int(y.max()) + 1
 idx = np.arange(N)
