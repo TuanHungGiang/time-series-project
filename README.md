@@ -30,6 +30,24 @@ python run_prism_z24.py --split setup
 `--log_every N` controls how often batch progress is printed. Everything is written to
 `results/<run name>/` (see "Pipeline and outputs").
 
+## Dedicated 10000-point Mamba experiment
+
+`train_mamba.py` reconstructs each original 60000-point recording and divides it into six
+non-overlapping samples of 10000 points. This produces `(918, 27, 10000)` with the scenario label
+preserved for every new sample. It uses the strict setup split: setups 0-5 for training, setup 6 for
+validation, and setups 7-8 for testing.
+
+```bash
+python train_mamba.py --epochs 100 --patience 12 --batch-size 4
+```
+
+Augmentation is applied on the fly to the training set only; validation and test signals are never
+augmented. Outputs are saved under `results/mamba_hard_seed42/`, including `trainlog.txt`, best and
+final weights, metrics, predictions, learning curves, confusion matrix, ROC curves, and 2D/3D t-SNE
+plots from epoch 1 and the final selected model. Open `train_mamba.ipynb` for an interactive local
+workflow, or upload `time-series.ipynb` to Kaggle. The Kaggle notebook clones this repository and
+downloads only `inputs.npy` and `labels.npy` from Hugging Face before training.
+
 ## Models (`--model`)
 
 All models read the full 6000-step, 27-channel sequence (no resampling); see `models_seq.py`.
@@ -121,9 +139,9 @@ val/test sees steps 1000-2999). Run names get a `_tw<N>` suffix when this is on.
 python run_prism_z24.py --model transformer --split setup --seq_len 1000 --seq_mode crop
 ```
 
-`visualize_z24.ipynb` plots the raw signals, the crop-vs-downsample comparison (waveform and power spectral
-density, showing the aliasing effect above), the label distribution, the average signal per scenario, and a
-t-SNE of spectral features coloured by scenario and by measurement setup.
+`visualize_z24.ipynb` reconstructs and visualises the `(918, 27, 10000)` dataset, creates the strict
+setup-based train/validation/test split, and demonstrates length-preserving train-only augmentation in both
+the time and frequency domains. It does not crop or downsample the 10000-point samples.
 
 ## Multi-GPU (Kaggle T4 x2)
 
