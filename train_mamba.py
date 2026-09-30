@@ -265,7 +265,11 @@ def train(config: TrainConfig | None = None):
             "test": Z24Dataset(x_path, y, test_idx, center, scale, cfg.clip_value),
         }
         generator = torch.Generator().manual_seed(cfg.seed)
-        common = dict(num_workers=cfg.num_workers, pin_memory=device.type == "cuda")
+        common = dict(
+            num_workers=cfg.num_workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=cfg.num_workers > 0,
+        )
         loaders = {
             "train": DataLoader(datasets["train"], batch_size=cfg.batch_size, shuffle=True,
                                 generator=generator, **common),
@@ -404,6 +408,8 @@ def parse_args():
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--stem-stride", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="DataLoader worker processes (use 2-4 on Kaggle, 0 on Windows if needed)")
     parser.add_argument("--run-name", default="mamba_hard_seed42")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--skip-tsne", action="store_true")
@@ -421,6 +427,7 @@ if __name__ == "__main__":
         layers=args.layers,
         stem_stride=args.stem_stride,
         seed=args.seed,
+        num_workers=args.num_workers,
         run_name=args.run_name,
         max_train_batches=args.max_train_batches,
         skip_tsne=args.skip_tsne,
