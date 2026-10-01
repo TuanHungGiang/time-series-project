@@ -1,8 +1,8 @@
-"""Train Mamba on grouped 10000-point Z24 windows without recording leakage.
+"""Train Mamba on 10000-point Z24 windows.
 
-The default balanced split rotates held-out setups by scenario, so every measurement
-setup is represented in training globally. The original unseen-setup split remains
-available as an explicitly harder domain-generalisation experiment.
+The default within-recording split uses four temporal windows for training, one for
+validation and one for testing from every (scenario, setup) recording. It is intended
+for learning all 17 classes; use the grouped modes for stricter generalisation tests.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from report import (compute_metrics, plot_class_accuracy, plot_class_setup_accur
 class TrainConfig:
     data_dir: str = str(ROOT / "Z24-dataset-processed")
     out_dir: str = str(ROOT / "results")
-    run_name: str = "mamba_balanced_seed42"
+    run_name: str = "mamba_within_recording_seed42"
     epochs: int = 100
     patience: int = 12
     batch_size: int = 4
@@ -50,7 +50,7 @@ class TrainConfig:
     max_train_batches: int = 0
     skip_tsne: bool = False
     use_augmentation: bool = True
-    split_mode: str = "balanced"
+    split_mode: str = "within_recording"
 
 
 class RunLogger:
@@ -105,9 +105,14 @@ def metadata():
     return y, setup, window, group
 
 
-def split_indices(labels: np.ndarray, setup: np.ndarray, group: np.ndarray, mode="balanced"):
-    """Split complete recordings: 6 train, 1 validation and 2 test setups per class."""
-    if mode == "unseen_setup":
+def split_indices(labels: np.ndarray, setup: np.ndarray, window: np.ndarray, group: np.ndarray,
+                  mode="within_recording"):
+    """Create the requested split while keeping class counts exactly balanced."""
+    if mode == "within_recording":
+        train_idx = np.where(window <= 3)[0]
+        val_idx = np.where(window == 4)[0]
+        test_idx = np.where(window == 5)[0]
+    elif mode == "unseen_setup":
         train_idx = np.where(setup <= 5)[0]
         val_idx = np.where(setup == 6)[0]
         test_idx = np.where(setup >= 7)[0]
@@ -126,16 +131,25 @@ def split_indices(labels: np.ndarray, setup: np.ndarray, group: np.ndarray, mode
     else:
         raise ValueError(f"Unknown split mode: {mode}")
 
-    assert set(group[train_idx]).isdisjoint(group[val_idx])
-    assert set(group[train_idx]).isdisjoint(group[test_idx])
-    assert set(group[val_idx]).isdisjoint(group[test_idx])
-    assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
-    assert np.all(np.bincount(labels[val_idx], minlength=17) == 6)
-    assert np.all(np.bincount(labels[test_idx], minlength=17) == 12)
+    assert len(set(train_idx) & set(val_idx)) == 0
+    assert len(set(train_idx) & set(test_idx)) == 0
+    assert len(set(val_idx) & set(test_idx)) == 0
+    if mode == "within_recording":
+        assert set(group[train_idx]) == set(group[val_idx]) == set(group[test_idx])
+        assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
+        assert np.all(np.bincount(labels[val_idx], minlength=17) == 9)
+        assert np.all(np.bincount(labels[test_idx], minlength=17) == 9)
+    else:
+        assert set(group[train_idx]).isdisjoint(group[val_idx])
+        assert set(group[train_idx]).isdisjoint(group[test_idx])
+        assert set(group[val_idx]).isdisjoint(group[test_idx])
+        assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
+        assert np.all(np.bincount(labels[val_idx], minlength=17) == 6)
+        assert np.all(np.bincount(labels[test_idx], minlength=17) == 12)
     return train_idx, val_idx, test_idx
 
 
-def save_split_manifest(path, labels, setup, group, train_idx, val_idx, test_idx, mode):
+def save_split_manifest(path, labels, setup, window, group, train_idx, val_idx, test_idx, mode):
     membership = np.full(len(labels), "", dtype="<U10")
     membership[train_idx] = "train"
     membership[val_idx] = "validation"
@@ -147,8 +161,9 @@ def save_split_manifest(path, labels, setup, group, train_idx, val_idx, test_idx
             "recording_id": int(recording_id),
             "scenario": int(labels[positions[0]]),
             "setup": int(setup[positions[0]]),
-            "split": str(membership[positions[0]]),
-            "windows": int(len(positions)),
+            "train_windows": window[positions][membership[positions] == "train"].astype(int).tolist(),
+            "validation_windows": window[positions][membership[positions] == "validation"].astype(int).tolist(),
+            "test_windows": window[positions][membership[positions] == "test"].astype(int).tolist(),
         })
     path.write_text(json.dumps({"mode": mode, "recordings": rows}, indent=2), encoding="utf-8")
 
@@ -332,13 +347,17 @@ def train(config: TrainConfig | None = None):
         x_path = ensure_10k_data(data_dir)
         x_shape = np.load(x_path, mmap_mode="r").shape
         y, setup, window, group = metadata()
-        train_idx, val_idx, test_idx = split_indices(y, setup, group, cfg.split_mode)
-        save_split_manifest(run_dir / "split_manifest.json", y, setup, group,
+        train_idx, val_idx, test_idx = split_indices(y, setup, window, group, cfg.split_mode)
+        save_split_manifest(run_dir / "split_manifest.json", y, setup, window, group,
                             train_idx, val_idx, test_idx, cfg.split_mode)
         logger(f"data={x_shape} | windows: train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
-        logger(f"independent recordings: train={len(np.unique(group[train_idx]))} "
+        logger(f"source recordings represented: train={len(np.unique(group[train_idx]))} "
                f"val={len(np.unique(group[val_idx]))} test={len(np.unique(group[test_idx]))}")
-        if cfg.split_mode == "balanced":
+        if cfg.split_mode == "within_recording":
+            logger("split=within_recording: windows 0-3 train | 4 validation | 5 test; "
+                   "all classes/setups occur in every split")
+            logger("note: splits contain different windows from the same source recordings")
+        elif cfg.split_mode == "balanced":
             logger("split=balanced: held-out setups rotate by scenario; every setup appears globally in train")
         else:
             logger("split=unseen_setup: train setups 0-5 | validation setup 6 | test setups 7-8")
@@ -453,8 +472,8 @@ def train(config: TrainConfig | None = None):
             save_tsne(model, loaders["test"], criterion, device, setup, group, run_dir,
                       "tsne_epoch_final", cfg.seed)
 
-        # The primary metrics use independent recordings. The best checkpoint is selected
-        # by recording-level validation loss, never by the test set.
+        # Grouped modes average windows from a recording. In within-recording mode each
+        # validation/test recording contributes exactly one held-out window.
         model.load_state_dict(torch.load(run_dir / "mamba_best.pt", map_location=device, weights_only=True))
         val_window = evaluate(model, loaders["val"], criterion, device)
         test_window = evaluate(model, loaders["test"], criterion, device)
@@ -466,16 +485,19 @@ def train(config: TrainConfig | None = None):
         test_window_metrics = compute_metrics(test_window["y"], test_window["pred"], test_window["prob"], 17)
         metrics = {
             "model": "mamba",
-            "difficulty": "medium_balanced_group" if cfg.split_mode == "balanced" else "hard_unseen_setup",
+            "difficulty": ({"within_recording": "easy_within_recording",
+                            "balanced": "medium_balanced_group",
+                            "unseen_setup": "hard_unseen_setup"}[cfg.split_mode]),
             "split_mode": cfg.split_mode,
-            "primary_evaluation_unit": "recording",
+            "primary_evaluation_unit": ("held_out_window_per_recording"
+                                        if cfg.split_mode == "within_recording" else "recording"),
             "input_shape": [27, 10000],
             "augmentation": "train_only" if cfg.use_augmentation else "disabled",
             "parameters": n_params,
             "best_epoch": best_epoch,
             "final_epoch": last_epoch,
             "split_sizes_windows": {"train": len(train_idx), "validation": len(val_idx), "test": len(test_idx)},
-            "split_sizes_recordings": {
+            "source_recordings_represented": {
                 "train": len(np.unique(group[train_idx])),
                 "validation": len(np.unique(group[val_idx])),
                 "test": len(np.unique(group[test_idx])),
@@ -507,11 +529,11 @@ def train(config: TrainConfig | None = None):
         plot_class_setup_accuracy(test_result["y"], test_result["pred"], test_result["setup"], 17,
                                   run_dir / "accuracy_per_class_by_setup.png")
 
-        logger("\nTEST RECORDING METRICS (mamba_best.pt; 6 windows averaged per recording)")
+        logger("\nTEST PRIMARY METRICS (mamba_best.pt)")
         for key, value in test_metrics.items():
             if key != "per_class":
                 logger(f"{key:24s}: {value}")
-        logger("\nRECORDING ACCURACY BY CLASS")
+        logger("\nACCURACY BY CLASS")
         for class_id, values in test_metrics["per_class"].items():
             logger(f"class {int(class_id):02d}: {values['recall']:.4f} "
                    f"({round(values['recall'] * values['support'])}/{values['support']})")
@@ -535,13 +557,14 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes (use 2-4 on Kaggle, 0 on Windows if needed)")
-    parser.add_argument("--run-name", default="mamba_balanced_seed42")
+    parser.add_argument("--run-name", default="mamba_within_recording_seed42")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--skip-tsne", action="store_true")
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable all training augmentation for an ablation run")
-    parser.add_argument("--split-mode", choices=("balanced", "unseen_setup"), default="balanced",
-                        help="balanced avoids global setup shift; unseen_setup is the original hard split")
+    parser.add_argument("--split-mode", choices=("within_recording", "balanced", "unseen_setup"),
+                        default="within_recording",
+                        help="within_recording learns all classes; grouped modes test harder generalisation")
     return parser.parse_args()
 
 

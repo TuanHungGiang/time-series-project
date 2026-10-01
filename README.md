@@ -34,13 +34,15 @@ python run_prism_z24.py --split setup
 
 `train_mamba.py` reconstructs each original 60000-point recording and divides it into six
 non-overlapping windows of 10000 points. This produces `(918, 27, 10000)` with the scenario label
-preserved for every window. The default `balanced` split assigns six complete recordings to train,
-one to validation and two to test for every class. Held-out setups rotate by class, so every setup
-is represented globally in training while all six windows from one recording remain in one split.
-Use `--split-mode unseen_setup` only for the original, much harder domain-generalisation experiment.
+preserved for every window. The default `within_recording` split assigns windows 0-3 of every
+`(scenario, setup)` recording to train, window 4 to validation and window 5 to test. This gives
+612/153/153 windows, with all 17 classes and all 9 setups represented in every split. Because the
+splits contain different windows from the same source recordings, this is an intentionally
+optimistic within-recording classification experiment. Use `--split-mode balanced` or
+`--split-mode unseen_setup` for stricter recording-group/domain-generalisation experiments.
 
 ```bash
-python train_mamba.py --split-mode balanced --no-augment --epochs 100 --patience 20 \
+python train_mamba.py --split-mode within_recording --no-augment --epochs 100 --patience 20 \
   --batch-size 8 --learning-rate 3e-4
 ```
 
