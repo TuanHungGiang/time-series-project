@@ -44,11 +44,15 @@ def compute_metrics(y_true, y_pred, prob, n_cls):
 def plot_training_curves(hist, path):
     ep = np.arange(1, len(hist["train_loss"]) + 1)
     fig, ax = plt.subplots(1, 3, figsize=(16, 4.2))
-    ax[0].plot(ep, hist["train_loss"], "o-", ms=3, label="train (augmented)")
-    ax[0].plot(ep, hist["val_loss"], "s-", ms=3, label="validation")
+    ax[0].plot(ep, hist["train_loss"], "o-", ms=3, label="train windows")
+    ax[0].plot(ep, hist["val_loss"], "s-", ms=3, label="validation recording")
+    if "val_window_loss" in hist:
+        ax[0].plot(ep, hist["val_window_loss"], ":", lw=1.2, label="validation window")
     ax[0].set(title="Loss convergence", xlabel="epoch", ylabel="cross-entropy")
-    ax[1].plot(ep, hist["train_acc"], "o-", ms=3, label="train (augmented)")
-    ax[1].plot(ep, hist["val_acc"], "s-", ms=3, label="validation")
+    ax[1].plot(ep, hist["train_acc"], "o-", ms=3, label="train windows")
+    ax[1].plot(ep, hist["val_acc"], "s-", ms=3, label="validation recording")
+    if "val_window_acc" in hist:
+        ax[1].plot(ep, hist["val_window_acc"], ":", lw=1.2, label="validation window")
     ax[1].set(title="Accuracy", xlabel="epoch", ylabel="accuracy", ylim=(0, 1))
     ax[2].semilogy(ep, hist["lr"], "o-", ms=3, color="tab:green")
     ax[2].set(title="Learning rate", xlabel="epoch", ylabel="lr")
@@ -83,6 +87,58 @@ def plot_confusion(y_true, y_pred, n_cls, path, title=""):
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return cm
+
+
+def plot_class_accuracy(y_true, y_pred, n_cls, path):
+    """Bar plot of recording-level accuracy (recall) for every scenario."""
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(n_cls)))
+    support = cm.sum(axis=1)
+    correct = np.diag(cm)
+    accuracy = correct / np.maximum(support, 1)
+    overall = float(np.trace(cm) / max(cm.sum(), 1))
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+    bars = ax.bar(np.arange(n_cls), accuracy * 100, color="steelblue", edgecolor="black")
+    ax.axhline(overall * 100, color="tab:red", ls="--", lw=1.5,
+               label=f"overall recording accuracy = {overall * 100:.2f}%")
+    ax.axhline(100 / n_cls, color="gray", ls=":", lw=1.5,
+               label=f"random chance = {100 / n_cls:.2f}%")
+    for bar, value, ok, total in zip(bars, accuracy, correct, support):
+        ax.text(bar.get_x() + bar.get_width() / 2, value * 100 + 1.5,
+                f"{value * 100:.0f}%\n({ok}/{total})", ha="center", va="bottom", fontsize=8)
+    ax.set(title="Recording-level test accuracy by damage scenario", xlabel="scenario",
+           ylabel="accuracy (%)", xticks=range(n_cls), ylim=(0, 112))
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def plot_class_setup_accuracy(y_true, y_pred, setup_ids, n_cls, path):
+    """Heatmap of recording accuracy for each scenario and held-out setup."""
+    setups = np.unique(setup_ids)
+    values = np.full((n_cls, len(setups)), np.nan, dtype=float)
+    for class_id in range(n_cls):
+        for column, setup_id in enumerate(setups):
+            selected = (y_true == class_id) & (setup_ids == setup_id)
+            if selected.any():
+                values[class_id, column] = np.mean(y_pred[selected] == y_true[selected])
+
+    fig, ax = plt.subplots(figsize=(6.5, 9))
+    image = ax.imshow(values * 100, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+    ax.set(title="Recording accuracy by scenario and test setup", xlabel="test setup",
+           ylabel="true scenario", xticks=range(len(setups)), yticks=range(n_cls),
+           xticklabels=[f"setup {value}" for value in setups], yticklabels=range(n_cls))
+    for row in range(n_cls):
+        for column in range(len(setups)):
+            if not np.isnan(values[row, column]):
+                ax.text(column, row, f"{values[row, column] * 100:.0f}%",
+                        ha="center", va="center", fontsize=8)
+    fig.colorbar(image, ax=ax, label="accuracy (%)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def plot_roc(y_true, prob, n_cls, path):

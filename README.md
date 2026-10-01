@@ -33,19 +33,25 @@ python run_prism_z24.py --split setup
 ## Dedicated 10000-point Mamba experiment
 
 `train_mamba.py` reconstructs each original 60000-point recording and divides it into six
-non-overlapping samples of 10000 points. This produces `(918, 27, 10000)` with the scenario label
-preserved for every new sample. It uses the strict setup split: setups 0-5 for training, setup 6 for
-validation, and setups 7-8 for testing.
+non-overlapping windows of 10000 points. This produces `(918, 27, 10000)` with the scenario label
+preserved for every window. The default `balanced` split assigns six complete recordings to train,
+one to validation and two to test for every class. Held-out setups rotate by class, so every setup
+is represented globally in training while all six windows from one recording remain in one split.
+Use `--split-mode unseen_setup` only for the original, much harder domain-generalisation experiment.
 
 ```bash
-python train_mamba.py --epochs 100 --patience 12 --batch-size 4
+python train_mamba.py --split-mode balanced --no-augment --epochs 100 --patience 20 \
+  --batch-size 8 --learning-rate 3e-4
 ```
 
 Augmentation is applied on the fly to the training set only; validation and test signals are never
-augmented. Add `--no-augment` for a no-augmentation ablation. Outputs are saved under
-`results/mamba_hard_seed42/`, including `trainlog.txt`, best and
-final weights, metrics, predictions, learning curves, confusion matrix, ROC curves, and 2D/3D t-SNE
-plots from epoch 1 and the final selected model. Open `train_mamba.ipynb` for an interactive local
+augmented. Add `--no-augment` for a no-augmentation ablation. Checkpoint selection and the primary
+test metrics operate at recording level by averaging the six window probabilities; window metrics
+are retained as secondary diagnostics. Outputs are saved under
+`results/<run_name>/`, including `trainlog.txt`, best and
+final weights, the exact `split_manifest.json`, recording/window predictions, learning curves,
+confusion matrices, per-class/setup accuracy, ROC curves, and 2D/3D t-SNE plots from epoch 1 and the
+final selected model. Open `train_mamba.ipynb` for an interactive local
 workflow, or upload `time-series.ipynb` to Kaggle. The Kaggle notebook clones this repository and
 downloads only `inputs.npy` and `labels.npy` from Hugging Face before training.
 

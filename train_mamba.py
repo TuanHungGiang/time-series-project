@@ -1,7 +1,8 @@
-"""Train the repository's Mamba classifier on the 10000-point Z24 dataset.
+"""Train Mamba on grouped 10000-point Z24 windows without recording leakage.
 
-Hard split: setups 0-5 train, setup 6 validation, setups 7-8 test.
-Augmentation is applied on-device to train batches only. Validation/test remain clean.
+The default balanced split rotates held-out setups by scenario, so every measurement
+setup is represented in training globally. The original unseen-setup split remains
+available as an explicitly harder domain-generalisation experiment.
 """
 
 from __future__ import annotations
@@ -24,14 +25,15 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from models_seq import build_model
-from report import compute_metrics, plot_confusion, plot_roc, plot_training_curves, plot_tsne
+from report import (compute_metrics, plot_class_accuracy, plot_class_setup_accuracy,
+                    plot_confusion, plot_roc, plot_training_curves, plot_tsne)
 
 
 @dataclass
 class TrainConfig:
     data_dir: str = str(ROOT / "Z24-dataset-processed")
     out_dir: str = str(ROOT / "results")
-    run_name: str = "mamba_hard_seed42"
+    run_name: str = "mamba_balanced_seed42"
     epochs: int = 100
     patience: int = 12
     batch_size: int = 4
@@ -48,6 +50,7 @@ class TrainConfig:
     max_train_batches: int = 0
     skip_tsne: bool = False
     use_augmentation: bool = True
+    split_mode: str = "balanced"
 
 
 class RunLogger:
@@ -102,14 +105,52 @@ def metadata():
     return y, setup, window, group
 
 
-def split_indices(setup: np.ndarray, group: np.ndarray):
-    train_idx = np.where(setup <= 5)[0]
-    val_idx = np.where(setup == 6)[0]
-    test_idx = np.where(setup >= 7)[0]
+def split_indices(labels: np.ndarray, setup: np.ndarray, group: np.ndarray, mode="balanced"):
+    """Split complete recordings: 6 train, 1 validation and 2 test setups per class."""
+    if mode == "unseen_setup":
+        train_idx = np.where(setup <= 5)[0]
+        val_idx = np.where(setup == 6)[0]
+        test_idx = np.where(setup >= 7)[0]
+    elif mode == "balanced":
+        split_code = np.full(len(labels), -1, dtype=np.int8)  # 0=train, 1=val, 2=test
+        for class_id in range(17):
+            val_setup = class_id % 9
+            test_setups = {(class_id + 1) % 9, (class_id + 2) % 9}
+            selected = labels == class_id
+            split_code[selected] = 0
+            split_code[selected & (setup == val_setup)] = 1
+            split_code[selected & np.isin(setup, list(test_setups))] = 2
+        train_idx = np.where(split_code == 0)[0]
+        val_idx = np.where(split_code == 1)[0]
+        test_idx = np.where(split_code == 2)[0]
+    else:
+        raise ValueError(f"Unknown split mode: {mode}")
+
     assert set(group[train_idx]).isdisjoint(group[val_idx])
     assert set(group[train_idx]).isdisjoint(group[test_idx])
     assert set(group[val_idx]).isdisjoint(group[test_idx])
+    assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
+    assert np.all(np.bincount(labels[val_idx], minlength=17) == 6)
+    assert np.all(np.bincount(labels[test_idx], minlength=17) == 12)
     return train_idx, val_idx, test_idx
+
+
+def save_split_manifest(path, labels, setup, group, train_idx, val_idx, test_idx, mode):
+    membership = np.full(len(labels), "", dtype="<U10")
+    membership[train_idx] = "train"
+    membership[val_idx] = "validation"
+    membership[test_idx] = "test"
+    rows = []
+    for recording_id in np.unique(group):
+        positions = np.where(group == recording_id)[0]
+        rows.append({
+            "recording_id": int(recording_id),
+            "scenario": int(labels[positions[0]]),
+            "setup": int(setup[positions[0]]),
+            "split": str(membership[positions[0]]),
+            "windows": int(len(positions)),
+        })
+    path.write_text(json.dumps({"mode": mode, "recordings": rows}, indent=2), encoding="utf-8")
 
 
 def robust_train_stats(x_path: Path, train_idx: np.ndarray):
@@ -221,16 +262,55 @@ def evaluate(model, loader, criterion, device, return_embeddings=False):
     return result
 
 
-def save_tsne(model, loader, criterion, device, setup, run_dir, name, seed):
-    result = evaluate(model, loader, criterion, device, return_embeddings=True)
+def aggregate_recordings(window_result, group_ids, setup_ids):
+    """Average six window probabilities/embeddings into one independent recording."""
+    ids = window_result["ids"]
+    sample_groups = group_ids[ids]
+    records = {key: [] for key in ("y", "pred", "prob", "ids", "setup", "window_count")}
+    if "embeddings" in window_result:
+        records["embeddings"] = []
+
+    for recording_id in np.unique(sample_groups):
+        positions = np.where(sample_groups == recording_id)[0]
+        labels = np.unique(window_result["y"][positions])
+        setups = np.unique(setup_ids[ids[positions]])
+        if len(labels) != 1 or len(setups) != 1:
+            raise ValueError(f"Recording {recording_id} has inconsistent labels or setups")
+
+        probability = window_result["prob"][positions].mean(axis=0, dtype=np.float64)
+        probability /= probability.sum()
+        records["y"].append(int(labels[0]))
+        records["pred"].append(int(probability.argmax()))
+        records["prob"].append(probability)
+        records["ids"].append(int(recording_id))
+        records["setup"].append(int(setups[0]))
+        records["window_count"].append(len(positions))
+        if "embeddings" in window_result:
+            records["embeddings"].append(window_result["embeddings"][positions].mean(axis=0))
+
+    for key in records:
+        records[key] = np.asarray(records[key])
+    true_probability = records["prob"][np.arange(len(records["y"])), records["y"]]
+    records["loss"] = float(-np.log(np.clip(true_probability, 1e-12, 1.0)).mean())
+    records["accuracy"] = float((records["pred"] == records["y"]).mean())
+    return records
+
+
+def save_tsne(model, loader, criterion, device, setup, group, run_dir, name, seed):
+    window_result = evaluate(model, loader, criterion, device, return_embeddings=True)
+    result = aggregate_recordings(window_result, group, setup)
     target_dir = run_dir / name
     target_dir.mkdir(parents=True, exist_ok=True)
-    ids = result["ids"]
+    np.savez(
+        target_dir / "window_embeddings.npz", embeddings=window_result["embeddings"],
+        y=window_result["y"], setup=setup[window_result["ids"]], sample_ids=window_result["ids"],
+    )
     np.savez(
         target_dir / "embeddings.npz",
-        embeddings=result["embeddings"], y=result["y"], setup=setup[ids], sample_ids=ids,
+        embeddings=result["embeddings"], y=result["y"], setup=result["setup"],
+        recording_ids=result["ids"], window_count=result["window_count"],
     )
-    plot_tsne(result["embeddings"], result["y"], setup[ids], target_dir, seed=seed)
+    plot_tsne(result["embeddings"], result["y"], result["setup"], target_dir, seed=seed)
     return result
 
 
@@ -252,9 +332,16 @@ def train(config: TrainConfig | None = None):
         x_path = ensure_10k_data(data_dir)
         x_shape = np.load(x_path, mmap_mode="r").shape
         y, setup, window, group = metadata()
-        train_idx, val_idx, test_idx = split_indices(setup, group)
-        logger(f"data={x_shape} | train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
-        logger("split: train setups 0-5 | validation setup 6 | test setups 7-8")
+        train_idx, val_idx, test_idx = split_indices(y, setup, group, cfg.split_mode)
+        save_split_manifest(run_dir / "split_manifest.json", y, setup, group,
+                            train_idx, val_idx, test_idx, cfg.split_mode)
+        logger(f"data={x_shape} | windows: train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
+        logger(f"independent recordings: train={len(np.unique(group[train_idx]))} "
+               f"val={len(np.unique(group[val_idx]))} test={len(np.unique(group[test_idx]))}")
+        if cfg.split_mode == "balanced":
+            logger("split=balanced: held-out setups rotate by scenario; every setup appears globally in train")
+        else:
+            logger("split=unseen_setup: train setups 0-5 | validation setup 6 | test setups 7-8")
 
         logger("computing robust normalization from train only ...")
         center, scale = robust_train_stats(x_path, train_idx)
@@ -286,7 +373,8 @@ def train(config: TrainConfig | None = None):
 
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.RAdam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-        history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "lr": []}
+        history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [],
+                   "val_window_loss": [], "val_window_acc": [], "lr": []}
         best_val_loss = math.inf
         best_epoch = 0
         bad_epochs = 0
@@ -328,19 +416,23 @@ def train(config: TrainConfig | None = None):
 
             train_loss = running_loss / seen
             train_acc = correct / seen
-            val_result = evaluate(model, loaders["val"], criterion, device)
+            val_window = evaluate(model, loaders["val"], criterion, device)
+            val_result = aggregate_recordings(val_window, group, setup)
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
             history["val_loss"].append(val_result["loss"])
             history["val_acc"].append(val_result["accuracy"])
+            history["val_window_loss"].append(val_window["loss"])
+            history["val_window_acc"].append(val_window["accuracy"])
             history["lr"].append(lr)
             logger(f"epoch {epoch:03d}/{cfg.epochs} lr={lr:.3e} train_loss={train_loss:.4f} "
-                   f"train_acc={train_acc:.4f} val_loss={val_result['loss']:.4f} "
-                   f"val_acc={val_result['accuracy']:.4f} time={time.time()-epoch_start:.1f}s")
+                   f"train_acc={train_acc:.4f} val_record_loss={val_result['loss']:.4f} "
+                   f"val_record_acc={val_result['accuracy']:.4f} "
+                   f"val_window_acc={val_window['accuracy']:.4f} time={time.time()-epoch_start:.1f}s")
 
             if epoch == 1 and not cfg.skip_tsne:
                 logger("saving test embeddings and t-SNE after epoch 1 ...")
-                save_tsne(model, loaders["test"], criterion, device, setup, run_dir,
+                save_tsne(model, loaders["test"], criterion, device, setup, group, run_dir,
                           "tsne_epoch_001", cfg.seed)
 
             torch.save(model.state_dict(), run_dir / "mamba_final.pt")
@@ -358,41 +450,72 @@ def train(config: TrainConfig | None = None):
 
         if not cfg.skip_tsne:
             logger(f"saving test embeddings and t-SNE after final epoch {last_epoch} ...")
-            save_tsne(model, loaders["test"], criterion, device, setup, run_dir,
+            save_tsne(model, loaders["test"], criterion, device, setup, group, run_dir,
                       "tsne_epoch_final", cfg.seed)
 
-        # Metrics use the checkpoint selected only by validation loss.
+        # The primary metrics use independent recordings. The best checkpoint is selected
+        # by recording-level validation loss, never by the test set.
         model.load_state_dict(torch.load(run_dir / "mamba_best.pt", map_location=device, weights_only=True))
-        val_result = evaluate(model, loaders["val"], criterion, device)
-        test_result = evaluate(model, loaders["test"], criterion, device)
+        val_window = evaluate(model, loaders["val"], criterion, device)
+        test_window = evaluate(model, loaders["test"], criterion, device)
+        val_result = aggregate_recordings(val_window, group, setup)
+        test_result = aggregate_recordings(test_window, group, setup)
         val_metrics = compute_metrics(val_result["y"], val_result["pred"], val_result["prob"], 17)
         test_metrics = compute_metrics(test_result["y"], test_result["pred"], test_result["prob"], 17)
+        val_window_metrics = compute_metrics(val_window["y"], val_window["pred"], val_window["prob"], 17)
+        test_window_metrics = compute_metrics(test_window["y"], test_window["pred"], test_window["prob"], 17)
         metrics = {
             "model": "mamba",
-            "difficulty": "hard_unseen_setup",
+            "difficulty": "medium_balanced_group" if cfg.split_mode == "balanced" else "hard_unseen_setup",
+            "split_mode": cfg.split_mode,
+            "primary_evaluation_unit": "recording",
             "input_shape": [27, 10000],
             "augmentation": "train_only" if cfg.use_augmentation else "disabled",
             "parameters": n_params,
             "best_epoch": best_epoch,
             "final_epoch": last_epoch,
-            "split_sizes": {"train": len(train_idx), "validation": len(val_idx), "test": len(test_idx)},
+            "split_sizes_windows": {"train": len(train_idx), "validation": len(val_idx), "test": len(test_idx)},
+            "split_sizes_recordings": {
+                "train": len(np.unique(group[train_idx])),
+                "validation": len(np.unique(group[val_idx])),
+                "test": len(np.unique(group[test_idx])),
+            },
             "validation": val_metrics,
             "test": test_metrics,
+            "validation_window": val_window_metrics,
+            "test_window": test_window_metrics,
         }
         (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         (run_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
-        np.savez(run_dir / "predictions_test.npz", y_true=test_result["y"], y_pred=test_result["pred"],
-                 probability=test_result["prob"], sample_ids=test_result["ids"], setup=setup[test_result["ids"]])
+        np.savez(run_dir / "predictions_test.npz", y_true=test_window["y"], y_pred=test_window["pred"],
+                 probability=test_window["prob"], sample_ids=test_window["ids"],
+                 recording_ids=group[test_window["ids"]], setup=setup[test_window["ids"]])
+        np.savez(run_dir / "predictions_test_recording.npz", y_true=test_result["y"],
+                 y_pred=test_result["pred"], probability=test_result["prob"],
+                 recording_ids=test_result["ids"], setup=test_result["setup"],
+                 window_count=test_result["window_count"])
 
         plot_training_curves(history, run_dir / "training_curves.png")
         plot_confusion(test_result["y"], test_result["pred"], 17,
-                       run_dir / "confusion_matrix.png", title="Mamba test -")
+                       run_dir / "confusion_matrix.png", title="Mamba test recordings -")
+        plot_confusion(test_window["y"], test_window["pred"], 17,
+                       run_dir / "confusion_matrix_window.png", title="Mamba test windows -")
         plot_roc(test_result["y"], test_result["prob"], 17, run_dir / "roc_curve.png")
+        plot_roc(test_window["y"], test_window["prob"], 17, run_dir / "roc_curve_window.png")
+        plot_class_accuracy(test_result["y"], test_result["pred"], 17,
+                            run_dir / "accuracy_per_class.png")
+        plot_class_setup_accuracy(test_result["y"], test_result["pred"], test_result["setup"], 17,
+                                  run_dir / "accuracy_per_class_by_setup.png")
 
-        logger("\nTEST METRICS (mamba_best.pt)")
+        logger("\nTEST RECORDING METRICS (mamba_best.pt; 6 windows averaged per recording)")
         for key, value in test_metrics.items():
             if key != "per_class":
                 logger(f"{key:24s}: {value}")
+        logger("\nRECORDING ACCURACY BY CLASS")
+        for class_id, values in test_metrics["per_class"].items():
+            logger(f"class {int(class_id):02d}: {values['recall']:.4f} "
+                   f"({round(values['recall'] * values['support'])}/{values['support']})")
+        logger(f"\nwindow_accuracy (secondary): {test_window_metrics['accuracy']}")
         logger(f"elapsed_minutes: {(time.time()-t0_all)/60:.2f}")
         logger(f"artifacts: {run_dir}")
         return run_dir, metrics
@@ -412,11 +535,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes (use 2-4 on Kaggle, 0 on Windows if needed)")
-    parser.add_argument("--run-name", default="mamba_hard_seed42")
+    parser.add_argument("--run-name", default="mamba_balanced_seed42")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--skip-tsne", action="store_true")
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable all training augmentation for an ablation run")
+    parser.add_argument("--split-mode", choices=("balanced", "unseen_setup"), default="balanced",
+                        help="balanced avoids global setup shift; unseen_setup is the original hard split")
     return parser.parse_args()
 
 
@@ -436,4 +561,5 @@ if __name__ == "__main__":
         max_train_batches=args.max_train_batches,
         skip_tsne=args.skip_tsne,
         use_augmentation=not args.no_augment,
+        split_mode=args.split_mode,
     ))
