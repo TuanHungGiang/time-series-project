@@ -42,7 +42,8 @@ python train_mamba.py --epochs 100 --patience 12 --batch-size 4
 ```
 
 Augmentation is applied on the fly to the training set only; validation and test signals are never
-augmented. Outputs are saved under `results/mamba_hard_seed42/`, including `trainlog.txt`, best and
+augmented. Add `--no-augment` for a no-augmentation ablation. Outputs are saved under
+`results/mamba_hard_seed42/`, including `trainlog.txt`, best and
 final weights, metrics, predictions, learning curves, confusion matrix, ROC curves, and 2D/3D t-SNE
 plots from epoch 1 and the final selected model. Open `train_mamba.ipynb` for an interactive local
 workflow, or upload `time-series.ipynb` to Kaggle. The Kaggle notebook clones this repository and

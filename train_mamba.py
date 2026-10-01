@@ -47,6 +47,7 @@ class TrainConfig:
     log_every: int = 10
     max_train_batches: int = 0
     skip_tsne: bool = False
+    use_augmentation: bool = True
 
 
 class RunLogger:
@@ -306,7 +307,8 @@ def train(config: TrainConfig | None = None):
             for batch_no, (x, target, _) in enumerate(loaders["train"], start=1):
                 x = x.to(device, non_blocking=True)
                 target = target.to(device, non_blocking=True)
-                x = augment_train_batch(x)  # train only
+                if cfg.use_augmentation:
+                    x = augment_train_batch(x)  # train only
                 optimizer.zero_grad(set_to_none=True)
                 logits = model(x.transpose(1, 2))
                 loss = criterion(logits, target)
@@ -369,7 +371,7 @@ def train(config: TrainConfig | None = None):
             "model": "mamba",
             "difficulty": "hard_unseen_setup",
             "input_shape": [27, 10000],
-            "augmentation": "train_only",
+            "augmentation": "train_only" if cfg.use_augmentation else "disabled",
             "parameters": n_params,
             "best_epoch": best_epoch,
             "final_epoch": last_epoch,
@@ -413,6 +415,8 @@ def parse_args():
     parser.add_argument("--run-name", default="mamba_hard_seed42")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--skip-tsne", action="store_true")
+    parser.add_argument("--no-augment", action="store_true",
+                        help="Disable all training augmentation for an ablation run")
     return parser.parse_args()
 
 
@@ -431,4 +435,5 @@ if __name__ == "__main__":
         run_name=args.run_name,
         max_train_batches=args.max_train_batches,
         skip_tsne=args.skip_tsne,
+        use_augmentation=not args.no_augment,
     ))
