@@ -42,6 +42,7 @@ class TrainConfig:
     hidden: int = 64
     layers: int = 2
     stem_stride: int = 25
+    dropout: float = 0.1
     clip_value: float = 10.0
     grad_clip: float = 4.0
     seed: int = 42
@@ -116,6 +117,14 @@ def split_indices(labels: np.ndarray, setup: np.ndarray, window: np.ndarray, gro
         train_idx = np.where(window <= 3)[0]
         val_idx = np.where(window == 4)[0]
         test_idx = np.where(window == 5)[0]
+    elif mode == "setup_holdout":
+        # Use the same setup partition for every class.  Unlike the legacy
+        # rotating split below, this cannot make setup identity predictive of
+        # the class label.  Two validation setups also make checkpoint
+        # selection less noisy (34 rather than 17 independent recordings).
+        train_idx = np.where(setup <= 4)[0]
+        val_idx = np.where((setup >= 5) & (setup <= 6))[0]
+        test_idx = np.where(setup >= 7)[0]
     elif mode == "unseen_setup":
         train_idx = np.where(setup <= 5)[0]
         val_idx = np.where(setup == 6)[0]
@@ -148,9 +157,14 @@ def split_indices(labels: np.ndarray, setup: np.ndarray, window: np.ndarray, gro
         assert set(group[train_idx]).isdisjoint(group[val_idx])
         assert set(group[train_idx]).isdisjoint(group[test_idx])
         assert set(group[val_idx]).isdisjoint(group[test_idx])
-        assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
-        assert np.all(np.bincount(labels[val_idx], minlength=17) == 6)
-        assert np.all(np.bincount(labels[test_idx], minlength=17) == 12)
+        expected = {
+            "setup_holdout": (30, 12, 12),
+            "unseen_setup": (36, 6, 12),
+            "balanced": (36, 6, 12),
+        }[mode]
+        assert np.all(np.bincount(labels[train_idx], minlength=17) == expected[0])
+        assert np.all(np.bincount(labels[val_idx], minlength=17) == expected[1])
+        assert np.all(np.bincount(labels[test_idx], minlength=17) == expected[2])
     return train_idx, val_idx, test_idx
 
 
@@ -367,8 +381,12 @@ def train(config: TrainConfig | None = None):
             logger("split=within_recording: windows 0-3 train | 4 validation | 5 test; "
                    "all classes/setups occur in every split")
             logger("note: splits contain different windows from the same source recordings")
+        elif cfg.split_mode == "setup_holdout":
+            logger("split=setup_holdout: setups 0-4 train | 5-6 validation | 7-8 test; "
+                   "the setup partition is identical for every class")
         elif cfg.split_mode == "balanced":
-            logger("split=balanced: held-out setups rotate by scenario; every setup appears globally in train")
+            logger("WARNING: split=balanced is a legacy class-rotating split; setup membership is "
+                   "correlated with the label. Prefer setup_holdout for unbiased evaluation.")
         else:
             logger("split=unseen_setup: train setups 0-5 | validation setup 6 | test setups 7-8")
 
@@ -395,7 +413,8 @@ def train(config: TrainConfig | None = None):
         }
 
         model_cfg = SimpleNamespace(enc_in=27, num_class=17, seq_len=10000)
-        model_args = SimpleNamespace(hidden=cfg.hidden, layers=cfg.layers, stem_stride=cfg.stem_stride)
+        model_args = SimpleNamespace(hidden=cfg.hidden, layers=cfg.layers,
+                                     stem_stride=cfg.stem_stride, dropout=cfg.dropout)
         model = build_model("mamba", model_cfg, model_args).to(device)
         n_params = sum(p.numel() for p in model.parameters())
         logger(f"model=mamba | params={n_params:,} | stem_stride={cfg.stem_stride}")
@@ -497,7 +516,8 @@ def train(config: TrainConfig | None = None):
             "model": "mamba",
             "difficulty": ({"temporal_holdout": "medium_temporal_holdout",
                             "within_recording": "easy_within_recording",
-                            "balanced": "medium_balanced_group",
+                            "balanced": "legacy_class_rotating_group",
+                            "setup_holdout": "hard_fixed_setup_holdout",
                             "unseen_setup": "hard_unseen_setup"}[cfg.split_mode]),
             "split_mode": cfg.split_mode,
             "primary_evaluation_unit": ("held_out_window_per_recording"
@@ -567,6 +587,8 @@ def parse_args():
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--stem-stride", type=int, default=25)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes (use 2-4 on Kaggle, 0 on Windows if needed)")
@@ -576,7 +598,8 @@ def parse_args():
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable all training augmentation for an ablation run")
     parser.add_argument("--split-mode",
-                        choices=("temporal_holdout", "within_recording", "balanced", "unseen_setup"),
+                        choices=("temporal_holdout", "within_recording", "setup_holdout",
+                                 "balanced", "unseen_setup"),
                         default="temporal_holdout",
                         help="temporal_holdout is the middle-difficulty default; grouped modes are stricter")
     return parser.parse_args()
@@ -592,6 +615,8 @@ if __name__ == "__main__":
         hidden=args.hidden,
         layers=args.layers,
         stem_stride=args.stem_stride,
+        dropout=args.dropout,
+        weight_decay=args.weight_decay,
         seed=args.seed,
         num_workers=args.num_workers,
         run_name=args.run_name,

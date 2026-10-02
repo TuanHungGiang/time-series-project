@@ -39,12 +39,23 @@ preserved for every window. The default `temporal_holdout` split assigns windows
 gap, and uses window 5 for testing. This gives 459/153/153 windows, with all 17 classes and all 9
 setups represented in every split. The splits still come from the same source recordings, but the
 gap makes test less correlated with train than the easier `within_recording` 4/1/1 split. Use
-`--split-mode balanced` or
-`--split-mode unseen_setup` for stricter recording-group/domain-generalisation experiments.
+`--split-mode setup_holdout` for the recommended recording-group/domain-generalisation
+experiment. It uses setups 0-4 for training, 5-6 for validation, and 7-8 for testing for every
+class. The identical setup partition prevents setup membership from becoming a shortcut for the
+class label. `unseen_setup` retains the older 6/1/2 partition; `balanced` is retained only for
+reproducibility and is not recommended because its class-dependent rotating setup assignment
+confounds class with split/setup membership.
 
 ```bash
 python train_mamba.py --split-mode temporal_holdout --no-augment --epochs 100 --patience 20 \
   --batch-size 8 --learning-rate 3e-4
+```
+
+Recommended strict run:
+
+```bash
+python train_mamba.py --split-mode setup_holdout --epochs 60 --patience 12 \
+  --batch-size 16 --learning-rate 3e-4 --weight-decay 1e-3 --dropout 0.3
 ```
 
 Augmentation is applied on the fly to the training set only; validation and test signals are never

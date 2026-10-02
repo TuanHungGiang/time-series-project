@@ -233,7 +233,7 @@ class PatchTransformer(nn.Module):
 
 
 def build_model(name, cfg, args=None):
-    """cfg needs enc_in, num_class, seq_len; args may carry hidden / layers / stem_stride."""
+    """cfg needs enc_in, num_class, seq_len; args may carry model hyperparameters."""
     def g(key, default):  # None / missing on the command line -> the model's own default
         v = getattr(args, key, None) if args is not None else None
         return default if v is None else v
@@ -244,7 +244,8 @@ def build_model(name, cfg, args=None):
     if name == "ms4n":
         return MS4N(c, k, d_model=g("hidden", 64), layers=g("layers", 1))
     if name == "mamba":
-        return MambaClassifier(c, k, hidden=g("hidden", 64), layers=g("layers", 2), stem_stride=g("stem_stride", 25))
+        return MambaClassifier(c, k, hidden=g("hidden", 64), layers=g("layers", 2),
+                               stem_stride=g("stem_stride", 25), dropout=g("dropout", 0.1))
     if name in ("gru", "lstm"):
         return RNNClassifier(c, k, kind=name, hidden=g("hidden", 64), layers=g("layers", 2),
                              stem_stride=g("stem_stride", 5))
