@@ -84,7 +84,14 @@ p.add_argument("--log_every", type=int, default=10, help="print training progres
 p.add_argument("--gpus", type=int, default=0,
                help="number of GPUs to use with DataParallel (0 = all visible GPUs)")
 p.add_argument("--out", default=str(ROOT / "results"))
+p.add_argument("--run-name", "--run_name", dest="run_name", default=None,
+               help="custom results subdirectory name (default: generated from the configuration)")
 args = p.parse_args()
+
+if args.run_name is not None:
+    run_name_path = Path(args.run_name)
+    if not args.run_name.strip() or run_name_path.name != args.run_name or args.run_name in (".", ".."):
+        p.error("--run-name must be one non-empty directory name without path separators")
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
@@ -282,7 +289,8 @@ def embed(ids):
 
 
 tw_tag = f"_tw{args.train_window}" if args.train_window else ""
-tag = f"{args.model}_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}{tw_tag}_seed{args.seed}"
+tag = (args.run_name or
+       f"{args.model}_{args.split}_{args.lr_schedule}_{'noaug' if args.no_augment else 'aug'}{tw_tag}_seed{args.seed}")
 run_dir = Path(args.out) / tag
 run_dir.mkdir(parents=True, exist_ok=True)
 best = {"val_loss": np.inf}

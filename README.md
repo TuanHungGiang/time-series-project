@@ -125,6 +125,7 @@ done
    are saved as `.npz` / `.json` so figures can be redrawn.
 
 Run folder name: `<model>_<split>_<lr_schedule>_<aug|noaug>_seed<seed>`.
+Pass `--run-name NAME` to override the generated folder name.
 
 For the native 6000-point hard baseline with conservative train-only augmentation:
 
