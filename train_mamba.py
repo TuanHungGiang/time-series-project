@@ -1,8 +1,8 @@
 """Train Mamba on 10000-point Z24 windows.
 
-The default within-recording split uses four temporal windows for training, one for
-validation and one for testing from every (scenario, setup) recording. It is intended
-for learning all 17 classes; use the grouped modes for stricter generalisation tests.
+The default temporal-holdout split uses three early windows for training, one for
+validation, leaves a full window as a gap, and tests on the final window from every
+(scenario, setup) recording. Use the grouped modes for stricter generalisation tests.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from report import (compute_metrics, plot_class_accuracy, plot_class_setup_accur
 class TrainConfig:
     data_dir: str = str(ROOT / "Z24-dataset-processed")
     out_dir: str = str(ROOT / "results")
-    run_name: str = "mamba_within_recording_seed42"
+    run_name: str = "mamba_temporal_holdout_seed42"
     epochs: int = 100
     patience: int = 12
     batch_size: int = 4
@@ -50,7 +50,7 @@ class TrainConfig:
     max_train_batches: int = 0
     skip_tsne: bool = False
     use_augmentation: bool = True
-    split_mode: str = "within_recording"
+    split_mode: str = "temporal_holdout"
 
 
 class RunLogger:
@@ -106,9 +106,13 @@ def metadata():
 
 
 def split_indices(labels: np.ndarray, setup: np.ndarray, window: np.ndarray, group: np.ndarray,
-                  mode="within_recording"):
+                  mode="temporal_holdout"):
     """Create the requested split while keeping class counts exactly balanced."""
-    if mode == "within_recording":
+    if mode == "temporal_holdout":
+        train_idx = np.where(window <= 2)[0]
+        val_idx = np.where(window == 3)[0]
+        test_idx = np.where(window == 5)[0]
+    elif mode == "within_recording":
         train_idx = np.where(window <= 3)[0]
         val_idx = np.where(window == 4)[0]
         test_idx = np.where(window == 5)[0]
@@ -134,9 +138,10 @@ def split_indices(labels: np.ndarray, setup: np.ndarray, window: np.ndarray, gro
     assert len(set(train_idx) & set(val_idx)) == 0
     assert len(set(train_idx) & set(test_idx)) == 0
     assert len(set(val_idx) & set(test_idx)) == 0
-    if mode == "within_recording":
+    if mode in ("temporal_holdout", "within_recording"):
         assert set(group[train_idx]) == set(group[val_idx]) == set(group[test_idx])
-        assert np.all(np.bincount(labels[train_idx], minlength=17) == 36)
+        expected_train = 27 if mode == "temporal_holdout" else 36
+        assert np.all(np.bincount(labels[train_idx], minlength=17) == expected_train)
         assert np.all(np.bincount(labels[val_idx], minlength=17) == 9)
         assert np.all(np.bincount(labels[test_idx], minlength=17) == 9)
     else:
@@ -164,6 +169,7 @@ def save_split_manifest(path, labels, setup, window, group, train_idx, val_idx, 
             "train_windows": window[positions][membership[positions] == "train"].astype(int).tolist(),
             "validation_windows": window[positions][membership[positions] == "validation"].astype(int).tolist(),
             "test_windows": window[positions][membership[positions] == "test"].astype(int).tolist(),
+            "unused_windows": window[positions][membership[positions] == ""].astype(int).tolist(),
         })
     path.write_text(json.dumps({"mode": mode, "recordings": rows}, indent=2), encoding="utf-8")
 
@@ -353,7 +359,11 @@ def train(config: TrainConfig | None = None):
         logger(f"data={x_shape} | windows: train={len(train_idx)} val={len(val_idx)} test={len(test_idx)}")
         logger(f"source recordings represented: train={len(np.unique(group[train_idx]))} "
                f"val={len(np.unique(group[val_idx]))} test={len(np.unique(group[test_idx]))}")
-        if cfg.split_mode == "within_recording":
+        if cfg.split_mode == "temporal_holdout":
+            logger("split=temporal_holdout: windows 0-2 train | 3 validation | 4 gap/unused | 5 test; "
+                   "all classes/setups occur in every split")
+            logger("note: splits contain temporally separated windows from the same source recordings")
+        elif cfg.split_mode == "within_recording":
             logger("split=within_recording: windows 0-3 train | 4 validation | 5 test; "
                    "all classes/setups occur in every split")
             logger("note: splits contain different windows from the same source recordings")
@@ -485,18 +495,21 @@ def train(config: TrainConfig | None = None):
         test_window_metrics = compute_metrics(test_window["y"], test_window["pred"], test_window["prob"], 17)
         metrics = {
             "model": "mamba",
-            "difficulty": ({"within_recording": "easy_within_recording",
+            "difficulty": ({"temporal_holdout": "medium_temporal_holdout",
+                            "within_recording": "easy_within_recording",
                             "balanced": "medium_balanced_group",
                             "unseen_setup": "hard_unseen_setup"}[cfg.split_mode]),
             "split_mode": cfg.split_mode,
             "primary_evaluation_unit": ("held_out_window_per_recording"
-                                        if cfg.split_mode == "within_recording" else "recording"),
+                                        if cfg.split_mode in ("temporal_holdout", "within_recording")
+                                        else "recording"),
             "input_shape": [27, 10000],
             "augmentation": "train_only" if cfg.use_augmentation else "disabled",
             "parameters": n_params,
             "best_epoch": best_epoch,
             "final_epoch": last_epoch,
             "split_sizes_windows": {"train": len(train_idx), "validation": len(val_idx), "test": len(test_idx)},
+            "unused_windows": int(len(y) - len(train_idx) - len(val_idx) - len(test_idx)),
             "source_recordings_represented": {
                 "train": len(np.unique(group[train_idx])),
                 "validation": len(np.unique(group[val_idx])),
@@ -557,14 +570,15 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0,
                         help="DataLoader worker processes (use 2-4 on Kaggle, 0 on Windows if needed)")
-    parser.add_argument("--run-name", default="mamba_within_recording_seed42")
+    parser.add_argument("--run-name", default="mamba_temporal_holdout_seed42")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--skip-tsne", action="store_true")
     parser.add_argument("--no-augment", action="store_true",
                         help="Disable all training augmentation for an ablation run")
-    parser.add_argument("--split-mode", choices=("within_recording", "balanced", "unseen_setup"),
-                        default="within_recording",
-                        help="within_recording learns all classes; grouped modes test harder generalisation")
+    parser.add_argument("--split-mode",
+                        choices=("temporal_holdout", "within_recording", "balanced", "unseen_setup"),
+                        default="temporal_holdout",
+                        help="temporal_holdout is the middle-difficulty default; grouped modes are stricter")
     return parser.parse_args()
 
 
