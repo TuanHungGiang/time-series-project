@@ -6,7 +6,13 @@ Splits are made by group instead of randomly to avoid leakage between segments o
 
   --split segment : per (scenario, setup) recording, segments 0-6 train / 7 val / 8-9 test
                     (same recordings in every split; optimistic)
-  --split setup   : setups 0-5 train / 6 val / 7-8 test (unseen measurement setups; strict)
+  --split setup           : setups 0-5 train / 6 val / 7-8 test (legacy strict split)
+  --split setup_holdout   : setups 0-4 train / 5-6 val / 7-8 test (recommended hard split)
+  --split low_data        : setups 0-2 train / 3-4 val / 5-8 test (low-data stress test)
+
+For every split, validation/test predictions are aggregated by averaging the probabilities of the
+segments that belong to the same original (scenario, setup) recording.  Recording-level metrics are
+primary; segment-level metrics are saved as secondary diagnostics.
 
 Pipeline: normalise per channel with train statistics -> augment the TRAIN set only (on the fly, every epoch) ->
 train -> report accuracy / precision / recall / F1 / ROC-AUC and save figures (loss curves, confusion matrix,
@@ -40,12 +46,15 @@ p.add_argument("--model", choices=MODEL_NAMES, default="prism",
 p.add_argument("--hidden", type=int, default=None, help="model width (default: 64)")
 p.add_argument("--layers", type=int, default=None, help="depth (defaults: ms4n 1, gru/lstm 2, transformer 3)")
 p.add_argument("--stem_stride", type=int, default=None,
-               help="gru/lstm only: stride of the learned conv stem (default 5; 1 = no length reduction, slow)")
-p.add_argument("--split", choices=["segment", "setup"], default="setup")
+               help="mamba/gru/lstm stride of the learned conv stem (model default if omitted)")
+p.add_argument("--split", choices=["segment", "setup", "setup_holdout", "low_data"],
+               default="setup_holdout")
 p.add_argument("--epochs", type=int, default=200)
 p.add_argument("--patience", type=int, default=10)
 p.add_argument("--batch_size", type=int, default=16)
 p.add_argument("--lr", type=float, default=1e-3)
+p.add_argument("--weight_decay", type=float, default=1e-4)
+p.add_argument("--dropout", type=float, default=0.1)
 p.add_argument("--lr_schedule", choices=["halve", "constant", "cosine"], default="halve",
                help="halve = PRISM default (lr/2 every epoch); constant; cosine decay over --epochs")
 p.add_argument("--seq_len", type=int, default=0,
@@ -97,13 +106,24 @@ n_cls = int(y.max()) + 1
 idx = np.arange(N)
 setup = (idx % 90) // 10
 segment = idx % 10
+recording = idx // 10
 
 if args.split == "segment":
     tr, va, te = segment <= 6, segment == 7, segment >= 8
-else:
+elif args.split == "setup":
     tr, va, te = setup <= 5, setup == 6, setup >= 7
+elif args.split == "setup_holdout":
+    tr, va, te = setup <= 4, (setup >= 5) & (setup <= 6), setup >= 7
+else:  # low_data
+    tr, va, te = setup <= 2, (setup >= 3) & (setup <= 4), setup >= 5
 tr, va, te = np.where(tr)[0], np.where(va)[0], np.where(te)[0]
-print(f"split={args.split} train={len(tr)} val={len(va)} test={len(te)}", flush=True)
+if args.split != "segment":
+    assert set(recording[tr]).isdisjoint(recording[va])
+    assert set(recording[tr]).isdisjoint(recording[te])
+    assert set(recording[va]).isdisjoint(recording[te])
+print(f"split={args.split} segments: train={len(tr)} val={len(va)} test={len(te)} | "
+      f"recordings: train={len(np.unique(recording[tr]))} "
+      f"val={len(np.unique(recording[va]))} test={len(np.unique(recording[te]))}", flush=True)
 
 # optional time-axis train/eval split: train samples see only the head, val/test samples only the tail
 if args.train_window:
@@ -155,7 +175,7 @@ gpu_names = ", ".join(torch.cuda.get_device_name(i) for i in range(n_gpu)) if n_
 print(f"[3/4] model {args.model}: {n_params/1e6:.3f}M params  device={dev}  gpus={max(n_gpu, 1)} ({gpu_names})  "
       f"batch {args.batch_size} total -> {args.batch_size // max(n_gpu, 1)} per GPU", flush=True)
 
-opt = torch.optim.RAdam(model.parameters(), lr=args.lr)
+opt = torch.optim.RAdam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 crit = nn.CrossEntropyLoss()
 
 # ---- training-set augmentation: each sample gets exactly one transform, drawn with these probabilities ----
@@ -221,6 +241,39 @@ def evaluate(ids):
     return loss / len(ids), float((preds == y[ids]).mean()), preds, probs
 
 
+def aggregate_recordings(ids, probs):
+    """Average segment probabilities into one prediction per source recording."""
+    groups = recording[ids]
+    rec_ids = np.unique(groups)
+    rec_y, rec_prob, rec_setup, counts = [], [], [], []
+    for rec_id in rec_ids:
+        positions = np.where(groups == rec_id)[0]
+        labels = np.unique(y[ids[positions]])
+        setups = np.unique(setup[ids[positions]])
+        if len(labels) != 1 or len(setups) != 1:
+            raise ValueError(f"Recording {rec_id} has inconsistent labels or setups")
+        probability = probs[positions].mean(axis=0, dtype=np.float64)
+        probability /= probability.sum()
+        rec_y.append(int(labels[0]))
+        rec_prob.append(probability)
+        rec_setup.append(int(setups[0]))
+        counts.append(len(positions))
+    rec_y = np.asarray(rec_y)
+    rec_prob = np.asarray(rec_prob)
+    rec_pred = rec_prob.argmax(axis=1)
+    true_prob = rec_prob[np.arange(len(rec_y)), rec_y]
+    return {
+        "y": rec_y,
+        "pred": rec_pred,
+        "prob": rec_prob,
+        "recording_ids": rec_ids,
+        "setup": np.asarray(rec_setup),
+        "segment_count": np.asarray(counts),
+        "loss": float(-np.log(np.clip(true_prob, 1e-12, 1.0)).mean()),
+        "accuracy": float((rec_pred == rec_y).mean()),
+    }
+
+
 @torch.no_grad()
 def embed(ids):
     """Features right before the classifier head (used for t-SNE); reads from Xt_eval, see evaluate()."""
@@ -272,9 +325,10 @@ for ep in range(args.epochs):
                   flush=True)
         if args.max_train_batches and nb >= args.max_train_batches:
             break
-    print(f"  ep {ep+1:3d} | evaluating val/test ...", flush=True)
-    vl, va_acc, _, _ = evaluate(va)
-    _, te_acc, _, _ = evaluate(te)  # printed for monitoring only; never used to pick the checkpoint
+    print(f"  ep {ep+1:3d} | evaluating validation recordings ...", flush=True)
+    _, va_segment_acc, _, va_prob = evaluate(va)
+    va_record = aggregate_recordings(va, va_prob)
+    vl, va_acc = va_record["loss"], va_record["accuracy"]
     hist["train_loss"].append(tl / nb)
     hist["train_acc"].append(correct / seen)
     hist["val_loss"].append(vl)
@@ -282,7 +336,8 @@ for ep in range(args.epochs):
     hist["lr"].append(lr)
     total = time.time() - t_start
     print(f"ep {ep+1:3d}/{args.epochs} lr {lr:.1e} train_loss {tl/nb:.4f} train_acc {correct/seen:.4f} "
-          f"val_loss {vl:.4f} val_acc {va_acc:.4f} test_acc {te_acc:.4f} | epoch {time.time()-t0:.0f}s, "
+          f"val_record_loss {vl:.4f} val_record_acc {va_acc:.4f} "
+          f"val_segment_acc {va_segment_acc:.4f} | epoch {time.time()-t0:.0f}s, "
           f"total {total/60:.1f} min, no-improve {bad}/{args.patience}", flush=True)
     if vl < best["val_loss"]:
         best = {"val_loss": vl, "epoch": ep + 1, "val_acc": va_acc}
@@ -298,20 +353,34 @@ for ep in range(args.epochs):
 # ---------------- final report on the checkpoint with the best validation loss ----------------
 from report import compute_metrics, plot_confusion, plot_roc, plot_tsne, plot_training_curves  # noqa: E402
 
-model.load_state_dict(torch.load(run_dir / "best.pt"))
-_, _, val_pred, val_prob = evaluate(va)
-_, _, te_pred, te_prob = evaluate(te)
-m_val = compute_metrics(y[va], val_pred, val_prob, n_cls)
-m_te = compute_metrics(y[te], te_pred, te_prob, n_cls)
+model.load_state_dict(torch.load(run_dir / "best.pt", map_location=dev, weights_only=True))
+_, _, val_segment_pred, val_segment_prob = evaluate(va)
+_, _, te_segment_pred, te_segment_prob = evaluate(te)
+val_record = aggregate_recordings(va, val_segment_prob)
+te_record = aggregate_recordings(te, te_segment_prob)
+m_val = compute_metrics(val_record["y"], val_record["pred"], val_record["prob"], n_cls)
+m_te = compute_metrics(te_record["y"], te_record["pred"], te_record["prob"], n_cls)
+m_val_segment = compute_metrics(y[va], val_segment_pred, val_segment_prob, n_cls)
+m_te_segment = compute_metrics(y[te], te_segment_pred, te_segment_prob, n_cls)
 res = {"model": args.model, "split": args.split, "lr_schedule": args.lr_schedule, "augmentation": not args.no_augment, "norm": args.norm,
        "batch_size": args.batch_size, "seed": args.seed, "params": n_params, "best_epoch": best["epoch"],
-       "epochs_run": len(hist["train_loss"]), "n_train": len(tr), "n_val": len(va), "n_test": len(te),
+       "epochs_run": len(hist["train_loss"]),
+       "primary_evaluation_unit": "recording",
+       "split_sizes_segments": {"train": len(tr), "validation": len(va), "test": len(te)},
+       "split_sizes_recordings": {"train": len(np.unique(recording[tr])),
+                                   "validation": len(val_record["y"]), "test": len(te_record["y"])},
        "val": {k: v for k, v in m_val.items() if k != "per_class"},
        "test": {k: v for k, v in m_te.items() if k != "per_class"},
-       "test_per_class": m_te["per_class"]}
+       "test_per_class": m_te["per_class"],
+       "val_segment": {k: v for k, v in m_val_segment.items() if k != "per_class"},
+       "test_segment": {k: v for k, v in m_te_segment.items() if k != "per_class"}}
 (run_dir / "metrics.json").write_text(json.dumps(res, indent=2))
 (run_dir / "history.json").write_text(json.dumps(hist, indent=2))
-np.savez(run_dir / "predictions_test.npz", y_true=y[te], y_pred=te_pred, prob=te_prob, setup=setup[te])
+np.savez(run_dir / "predictions_test.npz", y_true=y[te], y_pred=te_segment_pred,
+         prob=te_segment_prob, setup=setup[te], recording_ids=recording[te], segment=segment[te])
+np.savez(run_dir / "predictions_test_recording.npz", y_true=te_record["y"],
+         y_pred=te_record["pred"], prob=te_record["prob"], setup=te_record["setup"],
+         recording_ids=te_record["recording_ids"], segment_count=te_record["segment_count"])
 
 print("\n================ TEST SET (best-val checkpoint) ================", flush=True)
 for k, v in res["test"].items():
@@ -320,9 +389,13 @@ for k, v in res["test"].items():
 if not args.no_plots:
     print("saving figures ...", flush=True)
     plot_training_curves(hist, run_dir / "training_curves.png")
-    plot_confusion(y[te], te_pred, n_cls, run_dir / "confusion_matrix.png", title="Test set -")
-    plot_roc(y[te], te_prob, n_cls, run_dir / "roc_curve.png")
+    plot_confusion(te_record["y"], te_record["pred"], n_cls,
+                   run_dir / "confusion_matrix.png", title="Test recordings -")
+    plot_roc(te_record["y"], te_record["prob"], n_cls, run_dir / "roc_curve.png")
     emb = embed(te)
-    np.savez(run_dir / "embeddings_test.npz", emb=emb, y=y[te], setup=setup[te])
-    plot_tsne(emb, y[te], setup[te], run_dir, seed=args.seed)
+    rec_emb = np.stack([emb[recording[te] == rec_id].mean(axis=0)
+                        for rec_id in te_record["recording_ids"]])
+    np.savez(run_dir / "embeddings_test.npz", emb=rec_emb, y=te_record["y"],
+             setup=te_record["setup"], recording_ids=te_record["recording_ids"])
+    plot_tsne(rec_emb, te_record["y"], te_record["setup"], run_dir, seed=args.seed)
 print(f"done. everything is in {run_dir}", flush=True)

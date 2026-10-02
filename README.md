@@ -14,9 +14,16 @@ so `run_prism_z24.py` splits by group:
 | `--split` | train / val / test | what it measures |
 |---|---|---|
 | `segment` | segments 0-6 / 7 / 8-9 of every recording | optimistic: same recordings in every split |
-| `setup` | setups 0-5 / 6 / 7-8 | strict: test setups are never seen in training |
+| `setup` | setups 0-5 / 6 / 7-8 | legacy strict split: test setups are never seen in training |
+| `setup_holdout` | setups 0-4 / 5-6 / 7-8 | recommended hard split with a larger validation set |
+| `low_data` | setups 0-2 / 3-4 / 5-8 | low-data domain-generalisation stress test |
 
 Sample index = `scenario*90 + setup*10 + segment`.
+
+For all modes, validation and test probabilities are averaged across the available segments from
+each original `(scenario, setup)` recording. Checkpoint selection and primary metrics are therefore
+recording-level; segment-level metrics are saved only as secondary diagnostics. The grouped setup
+modes contain no recording overlap between train, validation, and test.
 
 ## Run locally
 
@@ -118,6 +125,17 @@ done
    are saved as `.npz` / `.json` so figures can be redrawn.
 
 Run folder name: `<model>_<split>_<lr_schedule>_<aug|noaug>_seed<seed>`.
+
+For the native 6000-point hard baseline with conservative train-only augmentation:
+
+```bash
+python run_prism_z24.py --model mamba --split setup_holdout --epochs 30 --patience 10 \
+  --batch_size 16 --lr 3e-4 --lr_schedule cosine --weight_decay 1e-4 --dropout 0.1 \
+  --stem_stride 25 --aug_noise 0.03 --aug_warp 0.01 --aug_crop_min 0.9 --seed 42
+```
+
+Only batches inside the training loop pass through `augment`; validation and test data are never
+augmented. Add `--no_augment` for a no-augmentation ablation on this pipeline.
 
 ## Run on Kaggle
 
