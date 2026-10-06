@@ -1,6 +1,8 @@
 # data and third-party code are fetched at run time, never committed
 Z24-dataset-processed/
 PRISM/
+/Quatar-Dataset A/
+/Quatar-Dataset B/
 
 # outputs
 results/

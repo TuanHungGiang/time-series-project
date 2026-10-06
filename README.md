@@ -150,6 +150,47 @@ kaggle kernels status <username>/z24-prism
 kaggle kernels output <username>/z24-prism -p kaggle_out
 ```
 
+### QUGS independent Dataset A/B benchmark
+
+`train_quatar_models.py` compares Mamba, 1D-CNN and BiLSTM for QUGS damage
+localisation. It deliberately refuses to split one recording into both train
+and test data and runs a two-direction cross-dataset benchmark:
+
+- Fold 1 trains/validates on Dataset A and tests every matching Dataset B recording.
+- Fold 2 trains/validates on Dataset B and tests every matching Dataset A recording.
+- The training dataset supplies 96 training windows and 24 validation windows
+  per class, separated by an 8-window guard gap.
+- Per-window, per-sensor z-scoring removes absolute offset/gain fingerprints
+  while preserving temporal and spectral shape. `--normalization train_global`
+  is available as an ablation.
+- The report includes correlated window-level metrics and recording-level
+  metrics obtained by averaging all window probabilities from each test file.
+- `summary_by_model.csv` reports mean and standard deviation across both directions.
+
+Add Dataset A and Dataset B as Kaggle inputs, enable a GPU, then run:
+
+```python
+!git clone https://github.com/TuanHungGiang/time-series-project.git
+%cd time-series-project
+!python train_quatar_models.py --direction both --normalization per_window \
+  --epochs 15 --patience 4 --batch-size 64 --num-workers 2
+```
+
+The script auto-detects `zzzAU.TXT`/`zzzAD*.TXT` and
+`zzzBU.TXT`/`zzzBD*.TXT` below `/kaggle/input`. If more than one copy exists,
+pass explicit paths:
+
+```python
+!python train_quatar_models.py \
+  --data-a "/kaggle/input/qugs/Quatar-Dataset A" \
+  --data-b "/kaggle/input/qugs/Quatar-Dataset B" \
+  --out-dir /kaggle/working/qugs_results \
+  --cache-dir /kaggle/working/qugs_cache
+```
+
+Checkpoints, predictions, confusion matrices, `summary.csv`, and the exact
+split manifest are written to `/kaggle/working/qugs_results` by default.
+
 ## Train on a short snippet, evaluate on the rest (`--train_window`)
 
 `--train_window N` splits every sample's time axis in two: **train** samples use only their first N steps
