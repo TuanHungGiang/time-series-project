@@ -157,6 +157,9 @@ localisation. With both datasets it runs a two-direction cross-dataset benchmark
 
 - Fold 1 trains/validates on Dataset A and tests every matching Dataset B recording.
 - Fold 2 trains/validates on Dataset B and tests every matching Dataset A recording.
+- If A and B contain different condition sets, the script automatically restricts
+  both sides to their class intersection and prints every excluded class. Classes
+  present on only one side cannot be evaluated as supervised test targets.
 - The training dataset supplies 96 training windows and 24 validation windows
   per class, separated by an 8-window guard gap.
 - Per-window, per-sensor z-scoring removes absolute offset/gain fingerprints

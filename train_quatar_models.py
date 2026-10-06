@@ -473,7 +473,8 @@ def train_one(name: str, cfg: Config, loaders: dict[str, DataLoader], class_name
                "recording_macro_f1": recording_macro_f1,
                "per_class": report}
     (model_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    test_kind = "TEMPORAL A (same recordings)" if fold_name.startswith("a_") else "INDEPENDENT DATASET"
+    temporal_folds = {"a_early_to_late", "a_late_to_early"}
+    test_kind = "TEMPORAL A (same recordings)" if fold_name in temporal_folds else "INDEPENDENT DATASET"
     print(f"  {test_kind} window accuracy={test['accuracy']:.3f}, "
           f"macro-F1={test['macro_f1']:.3f}", flush=True)
     print(f"  class-aggregated accuracy={recording_accuracy:.3f}, "
@@ -642,8 +643,6 @@ def run(cfg: Config | None = None) -> tuple[Path, list[dict]]:
     data_a_dir = resolve_dataset_dir(cfg.data_a_dir, "A")
     run_dir = Path(cfg.out_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    x_a, y_a, w_a, class_names, meta_a = build_cache(cfg, data_a_dir, "A")
-    bundle_a = (x_a, y_a, w_a, meta_a)
 
     requested_direction = cfg.direction
     if requested_direction == "auto":
@@ -661,11 +660,31 @@ def run(cfg: Config | None = None) -> tuple[Path, list[dict]]:
         data_b_dir = resolve_dataset_dir(cfg.data_b_dir, "B")
         effective_direction = requested_direction
 
+    if effective_direction == "temporal_a":
+        x_a, y_a, w_a, class_names, meta_a = build_cache(cfg, data_a_dir, "A")
+        dropped_a, dropped_b = [], []
+    else:
+        available_a = {parse_condition(path, "A") for path in discover_files(data_a_dir, "A")}
+        available_b = {parse_condition(path, "B") for path in discover_files(data_b_dir, "B")}
+        class_names = sorted(available_a & available_b, key=class_sort_key)
+        if len(class_names) < 2:
+            raise ValueError(f"Need at least two shared A/B classes, found: {class_names}")
+        dropped_a = sorted(available_a - set(class_names), key=class_sort_key)
+        dropped_b = sorted(available_b - set(class_names), key=class_sort_key)
+        x_a, y_a, w_a, _, meta_a = build_cache(
+            cfg, data_a_dir, "A", required_classes=class_names
+        )
+    bundle_a = (x_a, y_a, w_a, meta_a)
+
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
     print(f"Classes ({len(class_names)}): {', '.join(class_names)}")
     print(f"Dataset A: {data_a_dir}")
     print(f"Dataset B: {data_b_dir if data_b_dir else 'not provided'}")
     print(f"Evaluation mode: {effective_direction}")
+    if effective_direction != "temporal_a":
+        print(f"Shared A/B classes ({len(class_names)}): {', '.join(class_names)}")
+        print(f"Excluded A-only classes: {dropped_a or 'none'}")
+        print(f"Excluded B-only classes: {dropped_b or 'none'}")
     print(f"Normalization: {cfg.normalization}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
