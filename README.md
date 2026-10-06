@@ -153,8 +153,7 @@ kaggle kernels output <username>/z24-prism -p kaggle_out
 ### QUGS independent Dataset A/B benchmark
 
 `train_quatar_models.py` compares Mamba, 1D-CNN and BiLSTM for QUGS damage
-localisation. It deliberately refuses to split one recording into both train
-and test data and runs a two-direction cross-dataset benchmark:
+localisation. With both datasets it runs a two-direction cross-dataset benchmark:
 
 - Fold 1 trains/validates on Dataset A and tests every matching Dataset B recording.
 - Fold 2 trains/validates on Dataset B and tests every matching Dataset A recording.
@@ -190,6 +189,24 @@ pass explicit paths:
 
 Checkpoints, predictions, confusion matrices, `summary.csv`, and the exact
 split manifest are written to `/kaggle/working/qugs_results` by default.
+
+If only Dataset A is available, omit `--data-b` and select the explicit
+diagnostic mode:
+
+```python
+!python train_quatar_models.py \
+  --data-a "/kaggle/input/datasets/giangtuanhung/quatar-a/Dataset A" \
+  --direction temporal_a --normalization per_window \
+  --epochs 15 --patience 4 --batch-size 64 --num-workers 2
+```
+
+This runs two symmetric time-block folds (`early_to_late` and
+`late_to_early`). Every class has 72 train, 24 validation, and 24 test windows,
+with two 4-window guard gaps. The files, logs, and manifests clearly mark these
+scores as same-recording diagnostics; they are useful for model iteration but
+are not a substitute for an independent Dataset B test. With `--direction
+auto` (the default), the script uses A<->B when B is found and otherwise falls
+back to these two Dataset A folds.
 
 ## Train on a short snippet, evaluate on the rest (`--train_window`)
 

@@ -1,8 +1,8 @@
 """Benchmark Mamba, 1D-CNN and BiLSTM on independent QUGS recordings.
 
-The default runs two cross-dataset folds (A -> B and B -> A). In each fold the
-test dataset is never used for training, normalisation, or checkpoint selection.
-This avoids the leakage caused by splitting one recording into train and test.
+With Dataset B, the default runs two cross-dataset folds (A -> B and B -> A).
+Without B it falls back to two explicitly labelled, purged temporal diagnostics
+on A; those same-recording scores must not be treated as independent tests.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class Config:
     guard_windows: int = 8
     val_windows: int = 24
     num_workers: int = 0
-    direction: str = "both"
+    direction: str = "auto"
     normalization: str = "per_window"
 
 
@@ -236,6 +236,34 @@ def make_train_val_split(window_ids: np.ndarray, cfg: Config,
         "counts": {"train": len(train), "validation": len(val)},
     }
     return train, val, manifest
+
+
+def make_temporal_a_split(window_ids: np.ndarray, fold: str
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Two symmetric, purged temporal folds for the A-only diagnostic."""
+    if int(window_ids.max()) + 1 < 128:
+        raise ValueError("A-only temporal split requires at least 128 windows per recording")
+    if fold == "early_to_late":
+        train = np.flatnonzero(window_ids < 72)
+        val = np.flatnonzero((window_ids >= 76) & (window_ids < 100))
+        test = np.flatnonzero(window_ids >= 104)
+        ranges = {"train": [0, 71], "validation": [76, 99], "test": [104, 127],
+                  "guard": [[72, 75], [100, 103]]}
+    elif fold == "late_to_early":
+        test = np.flatnonzero(window_ids < 24)
+        val = np.flatnonzero((window_ids >= 28) & (window_ids < 52))
+        train = np.flatnonzero(window_ids >= 56)
+        ranges = {"test": [0, 23], "validation": [28, 51], "train": [56, 127],
+                  "guard": [[24, 27], [52, 55]]}
+    else:
+        raise ValueError(f"Unknown temporal fold: {fold}")
+    manifest = {
+        "strategy": f"Dataset A purged temporal diagnostic ({fold})",
+        "ranges": ranges,
+        "warning": ("Train and test are different time blocks from the same recording. "
+                    "This is not an independent-recording generalisation test."),
+    }
+    return train, val, test, manifest
 
 
 def channel_stats(x_path: Path, train_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -445,9 +473,10 @@ def train_one(name: str, cfg: Config, loaders: dict[str, DataLoader], class_name
                "recording_macro_f1": recording_macro_f1,
                "per_class": report}
     (model_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    print(f"  DATASET B window accuracy={test['accuracy']:.3f}, macro-F1={test['macro_f1']:.3f}",
-          flush=True)
-    print(f"  DATASET B recording accuracy={recording_accuracy:.3f}, "
+    test_kind = "TEMPORAL A (same recordings)" if fold_name.startswith("a_") else "INDEPENDENT DATASET"
+    print(f"  {test_kind} window accuracy={test['accuracy']:.3f}, "
+          f"macro-F1={test['macro_f1']:.3f}", flush=True)
+    print(f"  class-aggregated accuracy={recording_accuracy:.3f}, "
           f"macro-F1={recording_macro_f1:.3f}", flush=True)
     return metrics
 
@@ -532,6 +561,51 @@ def run_fold(cfg: Config, fold_name: str, train_bundle: tuple, test_bundle: tupl
             for name in cfg.models]
 
 
+def run_temporal_a_fold(cfg: Config, fold: str, bundle: tuple,
+                        class_names: list[str], device: torch.device,
+                        run_dir: Path) -> list[dict]:
+    x_path, labels, window_ids, metadata = bundle
+    train_idx, val_idx, test_idx, manifest = make_temporal_a_split(window_ids, fold)
+    fold_name = f"a_{fold}"
+    per_class_counts = {}
+    for split_name, indices in (("train", train_idx), ("validation", val_idx), ("test", test_idx)):
+        counts = np.bincount(labels[indices], minlength=len(class_names))
+        if not np.all(counts == counts[0]):
+            raise AssertionError(f"Unbalanced {fold_name}/{split_name}: {counts.tolist()}")
+        per_class_counts[split_name] = int(counts[0])
+
+    fold_dir = run_dir / fold_name
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    manifest.update({
+        "fold": fold_name,
+        "per_class_counts": per_class_counts,
+        "classes": class_names,
+        "window_seconds": cfg.window_raw / 1024,
+        "normalization": cfg.normalization,
+        "dataset": metadata,
+    })
+    (fold_dir / "split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    mean, std = channel_stats(x_path, train_idx)
+    np.savez(fold_dir / "normalization.npz", mean=mean, std=std,
+             mode=np.asarray(cfg.normalization))
+    datasets = {
+        "train": WindowDataset(x_path, labels, train_idx, mean, std, cfg.normalization),
+        "validation": WindowDataset(x_path, labels, val_idx, mean, std, cfg.normalization),
+        "test": WindowDataset(x_path, labels, test_idx, mean, std, cfg.normalization),
+    }
+    loaders = {
+        name: DataLoader(ds, batch_size=cfg.batch_size, shuffle=name == "train",
+                         num_workers=cfg.num_workers, pin_memory=torch.cuda.is_available(),
+                         persistent_workers=cfg.num_workers > 0)
+        for name, ds in datasets.items()
+    }
+    print(f"\n=== {fold_name}: Dataset A temporal diagnostic ===")
+    print("WARNING: test windows come from the same recording as train windows.")
+    print(f"Samples: train={len(train_idx)}, validation={len(val_idx)}, test={len(test_idx)}")
+    return [train_one(name, cfg, loaders, class_names, device, fold_dir, fold_name)
+            for name in cfg.models]
+
+
 def save_model_aggregate(results: list[dict], run_dir: Path) -> None:
     fields = ["model", "folds", "window_accuracy_mean", "window_accuracy_std",
               "macro_f1_mean", "macro_f1_std", "recording_accuracy_mean",
@@ -560,39 +634,61 @@ def save_model_aggregate(results: list[dict], run_dir: Path) -> None:
 
 def run(cfg: Config | None = None) -> tuple[Path, list[dict]]:
     cfg = cfg or Config()
-    if cfg.direction not in {"a_to_b", "b_to_a", "both"}:
-        raise ValueError("direction must be a_to_b, b_to_a, or both")
+    if cfg.direction not in {"auto", "temporal_a", "a_to_b", "b_to_a", "both"}:
+        raise ValueError("direction must be auto, temporal_a, a_to_b, b_to_a, or both")
     if cfg.normalization not in {"per_window", "train_global"}:
         raise ValueError("normalization must be per_window or train_global")
     set_seed(cfg.seed)
     data_a_dir = resolve_dataset_dir(cfg.data_a_dir, "A")
-    data_b_dir = resolve_dataset_dir(cfg.data_b_dir, "B")
     run_dir = Path(cfg.out_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     x_a, y_a, w_a, class_names, meta_a = build_cache(cfg, data_a_dir, "A")
-    x_b, y_b, w_b, _, meta_b = build_cache(cfg, data_b_dir, "B", required_classes=class_names)
-    bundles = {
-        "A": (x_a, y_a, w_a, meta_a),
-        "B": (x_b, y_b, w_b, meta_b),
-    }
-    folds = []
-    if cfg.direction in {"a_to_b", "both"}:
-        folds.append(("a_to_b", bundles["A"], bundles["B"]))
-    if cfg.direction in {"b_to_a", "both"}:
-        folds.append(("b_to_a", bundles["B"], bundles["A"]))
+    bundle_a = (x_a, y_a, w_a, meta_a)
+
+    requested_direction = cfg.direction
+    if requested_direction == "auto":
+        try:
+            data_b_dir = resolve_dataset_dir(cfg.data_b_dir, "B")
+        except FileNotFoundError:
+            data_b_dir = None
+            effective_direction = "temporal_a"
+        else:
+            effective_direction = "both"
+    elif requested_direction == "temporal_a":
+        data_b_dir = None
+        effective_direction = "temporal_a"
+    else:
+        data_b_dir = resolve_dataset_dir(cfg.data_b_dir, "B")
+        effective_direction = requested_direction
 
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
     print(f"Classes ({len(class_names)}): {', '.join(class_names)}")
     print(f"Dataset A: {data_a_dir}")
-    print(f"Dataset B: {data_b_dir}")
+    print(f"Dataset B: {data_b_dir if data_b_dir else 'not provided'}")
+    print(f"Evaluation mode: {effective_direction}")
     print(f"Normalization: {cfg.normalization}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
 
     results = []
-    for fold_name, train_bundle, test_bundle in folds:
-        results.extend(run_fold(cfg, fold_name, train_bundle, test_bundle,
-                                class_names, device, run_dir))
+    if effective_direction == "temporal_a":
+        print("WARNING: Dataset B is unavailable. Running two purged temporal folds on Dataset A; "
+              "these scores are not independent-recording results.")
+        for fold in ("early_to_late", "late_to_early"):
+            results.extend(run_temporal_a_fold(cfg, fold, bundle_a, class_names, device, run_dir))
+    else:
+        x_b, y_b, w_b, _, meta_b = build_cache(
+            cfg, data_b_dir, "B", required_classes=class_names
+        )
+        bundle_b = (x_b, y_b, w_b, meta_b)
+        folds = []
+        if effective_direction in {"a_to_b", "both"}:
+            folds.append(("a_to_b", bundle_a, bundle_b))
+        if effective_direction in {"b_to_a", "both"}:
+            folds.append(("b_to_a", bundle_b, bundle_a))
+        for fold_name, train_bundle, test_bundle in folds:
+            results.extend(run_fold(cfg, fold_name, train_bundle, test_bundle,
+                                    class_names, device, run_dir))
     save_summary(results, run_dir)
     save_model_aggregate(results, run_dir)
     print("\nCROSS-DATASET RESULTS")
@@ -623,8 +719,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--direction", choices=["a_to_b", "b_to_a", "both"], default="both",
-                        help="Cross-dataset evaluation direction (default: both directions).")
+    parser.add_argument("--direction",
+                        choices=["auto", "temporal_a", "a_to_b", "b_to_a", "both"],
+                        default="auto",
+                        help=("auto uses A<->B when B exists, otherwise two purged temporal A folds; "
+                              "temporal_a explicitly runs without Dataset B."))
     parser.add_argument("--normalization", choices=["per_window", "train_global"],
                         default="per_window",
                         help="Per-window sensor z-score removes acquisition gain fingerprints.")
