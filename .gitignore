@@ -16,3 +16,8 @@ __pycache__/
 .vscode/
 .ipynb_checkpoints/
 .claude/
+
+# keep the repository focused on the single runnable Kaggle notebook
+*.ipynb
+!kaggle_z24_tspulse_xgb_guided.ipynb
+granite-tsfm-main/
