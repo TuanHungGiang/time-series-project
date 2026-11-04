@@ -38,9 +38,6 @@ from sklearn.metrics import (
 )
 from torch.utils.data import DataLoader, Dataset
 
-from model.ScatterAD import Model
-
-
 def seed_all(seed: int) -> None:
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
@@ -141,6 +138,11 @@ def transform(x: np.ndarray, center: np.ndarray, scale: np.ndarray) -> np.ndarra
 
 
 def train_model(parts: list[np.ndarray], args, device, run_name: str):
+    # ScatterAD is an optional dependency for modules that only reuse this
+    # file's Z24 loading/metrics helpers (for example the Procrustes baseline).
+    # Import it only when a ScatterAD model is actually trained.
+    from model.ScatterAD import Model
+
     center, scale = fit_scaler(parts)
     x = transform(np.concatenate(parts), center, scale)
     model = Model(input_dim=1, hidden_dim=args.hidden, num_layers=args.layers).to(device)
