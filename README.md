@@ -44,6 +44,24 @@ Z24 adapter around the pinned official ScatterAD model, not author code.
 Results are written to `/kaggle/working/z24_scatterad_bdc`, including the 18
 out-of-fold S01 BDC decisions needed to audit the claimed false-alarm control.
 
+### Paper-method experiment 2: modal autoencoder + Procrustes
+
+This equation-based reproduction follows Nogueira et al., MSSP 261 (2026)
+115013. It intentionally uses a different, explicitly target-adaptive protocol:
+S01 setups 1--6 train the autoencoder, S01 setups 7--9 calibrate it, and S08
+setups 1--3 are target-healthy commissioning observations used only to estimate
+the latent Procrustes rotation. Those six S08 records are excluded from every
+reported metric; all damage records and S08 setups 4--9 form evaluation.
+
+```python
+!python kaggle/z24_procrustes_ae_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 300 --patience 50
+```
+
+The output `/kaggle/working/z24_procrustes_ae/metrics.csv` reports both the
+unaligned autoencoder and Procrustes-adapted result under the identical split.
+
 ## Z24 all-record healthy-only anomaly split
 
 The repository also supports the raw-record Kaggle package
