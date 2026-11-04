@@ -3,12 +3,12 @@
 Protocol (record-disjoint and damage-blind):
 * AE train: S01 setups 1--6 (12 records)
 * healthy calibration: S01 setups 7--9 (6 records)
-* target commissioning alignment: S08 setups 1--3 (6 records)
-* evaluation: S08 setups 4--9 plus every damage record
+* target commissioning alignment: all nine S08 setups from one excitation
+* evaluation: the opposite-excitation S08 records and damage records
 
-The six S08 commissioning records are never evaluated.  This is therefore not
-the zero-target S01-only protocol; it is the paper's target-healthy adaptation
-setting without target labels beyond the known commissioning condition.  No
+Two cross-fit directions (AVT -> FVT and FVT -> AVT) ensure every evaluated S08
+record is scored by a transform that did not use it.  This is not the zero-target
+S01-only protocol; it is the paper's target-healthy adaptation setting.  No
 public author code was found, so this is an equation-based reproduction.
 """
 from __future__ import annotations
@@ -91,7 +91,7 @@ def train_ae(train_x, val_x, args, device):
             best, best_state, patience = float(val), copy.deepcopy(model.state_dict()), 0
         else: patience += 1
         if epoch == 1 or epoch % 25 == 0:
-            print(f"epoch={epoch}/{args.epochs} train={float(loss):.6f} val={float(val):.6f}", flush=True)
+            print(f"epoch={epoch}/{args.epochs} train={float(loss.detach()):.6f} val={float(val):.6f}", flush=True)
         if patience >= args.patience: break
     model.load_state_dict(best_state); return model, pd.DataFrame(rows)
 
@@ -149,11 +149,12 @@ def main() -> None:
     frame = base.resolve_manifest(args.manifest, args.data_root)
     source_train = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].copy()
     source_cal = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].copy()
-    target_adapt = frame[(frame.state == "08") & (frame.setup.astype(int) <= 3)].copy()
-    evaluation = frame[((frame.state == "08") & (frame.setup.astype(int) >= 4)) |
-                       (~frame.state.isin(["01", "02", "08"]))].copy()
+    source_all = frame[frame.state == "01"].copy()
+    target_all = frame[frame.state == "08"].copy()
+    damage_all = frame[~frame.state.isin(["01", "02", "08"])].copy()
     groups = {"source_train": source_train, "source_cal": source_cal,
-              "target_adapt": target_adapt, "evaluation": evaluation}
+              "source_alignment": source_all, "target_S08": target_all,
+              "damage_evaluation": damage_all}
     cache = {}
     for group, rows in groups.items():
         for i, row in enumerate(rows.itertuples(), 1):
@@ -168,16 +169,29 @@ def main() -> None:
     cal_errors = reconstruction_error(model, x_cal, device)
     threshold = float(np.quantile(cal_errors, args.calibration_quantile))
 
-    keys = [f"{int(r.setup):02d}_{r.excitation}" for r in source_train.itertuples() if int(r.setup) <= 3]
-    source_map = {f"{int(r.setup):02d}_{r.excitation}": cache[r.record_id] for r in source_train.itertuples()}
-    target_map = {f"{int(r.setup):02d}_{r.excitation}": cache[r.record_id] for r in target_adapt.itertuples()}
-    source_align = tx(np.stack([source_map[k] for k in keys]), center, scale)
-    target_align = tx(np.stack([target_map[k] for k in keys]), center, scale)
-    transform = fit_procrustes(encode(model, source_align, device), encode(model, target_align, device))
-
-    x_eval = tx(np.stack([cache[x] for x in evaluation.record_id]), center, scale)
-    raw_scores = reconstruction_error(model, x_eval, device)
-    aligned_scores = reconstruction_error(model, x_eval, device, transform)
+    raw_parts, aligned_parts, evaluation_parts, transforms = [], [], [], {}
+    # Cross-fit target adaptation: every setup is represented in commissioning,
+    # while each evaluated S08 record is scored by a transform fitted only on
+    # the opposite excitation. Damage records are never used for alignment.
+    for adapt_excitation, eval_excitation in (("avt", "fvt"), ("fvt", "avt")):
+        source_align_rows = source_all[source_all.excitation == adapt_excitation].sort_values("setup")
+        target_align_rows = target_all[target_all.excitation == adapt_excitation].sort_values("setup")
+        evaluation = pd.concat([
+            target_all[target_all.excitation == eval_excitation],
+            damage_all[damage_all.excitation == eval_excitation],
+        ], ignore_index=True).sort_values(["state", "setup"])
+        source_align = tx(np.stack([cache[x] for x in source_align_rows.record_id]), center, scale)
+        target_align = tx(np.stack([cache[x] for x in target_align_rows.record_id]), center, scale)
+        transform = fit_procrustes(encode(model, source_align, device),
+                                   encode(model, target_align, device))
+        x_eval = tx(np.stack([cache[x] for x in evaluation.record_id]), center, scale)
+        raw_parts.append(reconstruction_error(model, x_eval, device))
+        aligned_parts.append(reconstruction_error(model, x_eval, device, transform))
+        evaluation["protocol_fold"] = f"adapt_{adapt_excitation}_test_{eval_excitation}"
+        evaluation_parts.append(evaluation)
+        transforms[adapt_excitation] = transform
+    evaluation = pd.concat(evaluation_parts, ignore_index=True)
+    raw_scores = np.concatenate(raw_parts); aligned_scores = np.concatenate(aligned_parts)
     raw_records, raw_states, raw_result = evaluate(evaluation, raw_scores, threshold, "AE_modal_no_alignment")
     aligned_records, aligned_states, aligned_result = evaluate(
         evaluation, aligned_scores, threshold, "AE_modal_Procrustes_MSSP2026_equation_reproduction")
@@ -188,11 +202,15 @@ def main() -> None:
     results = pd.DataFrame([raw_result, aligned_result]); results["seconds"] = time.time() - started
     results.to_csv(args.output / "metrics.csv", index=False)
     torch.save({"state_dict": model.state_dict(), "center": center, "scale": scale,
-                "transform": transform, "threshold": threshold, "args": vars(args)}, args.output / "model.pt")
+                "transforms": transforms, "threshold": threshold, "args": vars(args)}, args.output / "model.pt")
     metadata = {"paper": "Nogueira et al., integrated AE-based unsupervised domain adaptation, MSSP 261 (2026) 115013",
                 "doi": "10.1016/j.ymssp.2026.115013",
                 "implementation_scope": "equation-based PDT adapter; architecture reduced for 12 source records",
-                "important_protocol_change": "six S08 commissioning records fit Procrustes and are excluded from evaluation",
+                "important_protocol_change": (
+                    "two cross-fit target folds: all nine S08 AVT records align the FVT evaluation fold, "
+                    "then all nine S08 FVT records align the AVT evaluation fold; no record is evaluated "
+                    "by a transform that used it"
+                ),
                 "damage_used_for_fit": False, "evaluation_records": len(evaluation), "parameters": vars(args)}
     (args.output / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
