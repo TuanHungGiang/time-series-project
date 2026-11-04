@@ -319,3 +319,25 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 
 Ablation without augmentation: add `--no_augment`.
 
+
+## Audit the Z24 healthy/damage split
+
+Z24 progressive-damage labels describe the structural condition during an
+entire MAT acquisition. They are not timestamps inside a recording. Generate a
+state-by-record split map, chronology, comparable waveforms and PSD plots with:
+
+```python
+!python visualize_z24_split_labels.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
+```
+
+State 01 is the initial undamaged reference. State 08 is displayed separately
+as the post-lifting reference, even though its binary label is healthy. State 02
+is an installation/transition state and is excluded. To identify the exact
+healthy validation record that set ScatterAD's threshold, add:
+
+```python
+!python visualize_z24_split_labels.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --scores /kaggle/working/z24_scatterad_shared/record_scores.csv
+```
