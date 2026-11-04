@@ -32,6 +32,23 @@ For a deeply nested Kaggle input path, pass either the package root or its
   --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
 ```
 
+### ScatterAD (NeurIPS 2025) shared-sensor baseline
+
+To avoid the unstable calibration of 18 separate CATCH models, run one shared
+ScatterAD model over all healthy sensor windows. This keeps the authors'
+architecture, loss and scoring rule, while using a disclosed univariate-sensor
+adapter so 15/16/17-channel records share one score space:
+
+```python
+!python kaggle/z24_scatterad_shared_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 2 --batch-size 128
+```
+
+Results are written to `/kaggle/working/z24_scatterad_shared`. The bootstrap
+pins the official author repository and applies the disclosed one-line fix for
+normalizing its one-dimensional center vector.
+
 Train [PRISM](https://github.com/fedezuc/PRISM) (a lightweight multivariate time-series classifier) on the
 processed Z24 bridge dataset, [thanglexuan/Z24-dataset-processed](https://huggingface.co/datasets/thanglexuan/Z24-dataset-processed):
 1530 samples x 27 accelerometer channels x 6000 time steps, 17 damage scenarios. The full 6000-sample
