@@ -1,5 +1,29 @@
 # z24-prism
 
+## Z24 all-record healthy-only anomaly split
+
+The repository also supports the raw-record Kaggle package
+`z24-bridge-all-records-anomaly-split`. It inventories 306 MAT files, excludes
+the 18 ambiguous state-02 installation records, trains on 24 whole healthy
+records only, and evaluates on independent validation/test records containing
+six healthy plus 126 damage recordings each. Damage states are exclusive across
+validation and test.
+
+The initial baseline uses the authors' CATCH implementation without modifying
+its architecture/loss. It trains one model per `AVT/FVT x setup` configuration
+so channel indices from different roving-sensor layouts are never conflated.
+
+On Kaggle, attach the dataset, enable Internet and GPU, then run:
+
+```python
+!git clone https://github.com/TuanHungGiang/time-series-project.git
+%cd time-series-project
+!python kaggle/z24_all_records_kaggle.py
+```
+
+Outputs are written to `/kaggle/working/z24_all_records_catch`. The portable
+dataset manifest is discovered automatically under `/kaggle/input`.
+
 Train [PRISM](https://github.com/fedezuc/PRISM) (a lightweight multivariate time-series classifier) on the
 processed Z24 bridge dataset, [thanglexuan/Z24-dataset-processed](https://huggingface.co/datasets/thanglexuan/Z24-dataset-processed):
 1530 samples x 27 accelerometer channels x 6000 time steps, 17 damage scenarios. The full 6000-sample
@@ -269,3 +293,4 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 ```
 
 Ablation without augmentation: add `--no_augment`.
+
