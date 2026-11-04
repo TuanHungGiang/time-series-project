@@ -1,5 +1,30 @@
 # z24-prism
 
+## Strict S01-only PSD + ScatterAD baseline (no target leakage)
+
+This experiment uses the pinned official
+[ScatterAD](https://github.com/jk-sounds/ScatterAD) NeurIPS 2025 model with a
+disclosed per-sensor log-Welch-PSD adapter. Exactly 18 state-01 records are used
+for training and setup-grouped cross-fitted calibration. State 08 (post-lifting
+healthy) and every damage state are evaluation-only; no target label, score or
+statistic selects the model or threshold.
+
+On Kaggle, attach `z24-dataset-my`, enable Internet and GPU, then run one epoch:
+
+```python
+!git clone https://github.com/TuanHungGiang/time-series-project.git
+%cd time-series-project
+!python kaggle/z24_strict_psd_scatterad_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 1 --cv-folds 3 --batch-size 128
+```
+
+Outputs are saved in `/kaggle/working/z24_strict_psd_scatterad`: cross-fitted
+S01 scores, frozen threshold, record/state scores, metrics, training history,
+ROC/PR curves, confusion matrix, checkpoint and full run metadata. For the most
+strict leave-one-setup-out calibration use `--cv-folds 9`; the default three
+setup-grouped folds are a faster smoke experiment and remain record-disjoint.
+
 ## Z24 all-record healthy-only anomaly split
 
 The repository also supports the raw-record Kaggle package
