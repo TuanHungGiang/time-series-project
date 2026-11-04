@@ -24,6 +24,14 @@ On Kaggle, attach the dataset, enable Internet and GPU, then run:
 Outputs are written to `/kaggle/working/z24_all_records_catch`. The portable
 dataset manifest is discovered automatically under `/kaggle/input`.
 
+For a deeply nested Kaggle input path, pass either the package root or its
+`train` directory explicitly:
+
+```python
+!python kaggle/z24_all_records_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
+```
+
 Train [PRISM](https://github.com/fedezuc/PRISM) (a lightweight multivariate time-series classifier) on the
 processed Z24 bridge dataset, [thanglexuan/Z24-dataset-processed](https://huggingface.co/datasets/thanglexuan/Z24-dataset-processed):
 1530 samples x 27 accelerometer channels x 6000 time steps, 17 damage scenarios. The full 6000-sample
