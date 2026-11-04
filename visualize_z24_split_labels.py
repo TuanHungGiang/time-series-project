@@ -174,8 +174,10 @@ def signal_and_psd(frame: pd.DataFrame, output: Path, excitation: str, setup: in
         raise ValueError("No common vertical sensor exists across the selected records")
     sensor = sorted(common)[0]
     fig_signal, axes_signal = plt.subplots(len(rows), 1, figsize=(14, 11), sharex=True)
-    fig_psd, axes_psd = plt.subplots(len(rows), 1, figsize=(14, 11), sharex=True)
+    fig_psd, axes_psd = plt.subplots(len(rows), 1, figsize=(14, 11), sharex=True, sharey=True)
     axes_signal = np.atleast_1d(axes_signal); axes_psd = np.atleast_1d(axes_psd)
+    spectra: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    state_colors: dict[str, str] = {}
     for ax_time, ax_psd, row in zip(axes_signal, axes_psd, rows):
         data, labels = loaded[row.state]
         series = data[:, labels.index(sensor)]
@@ -190,6 +192,8 @@ def signal_and_psd(frame: pd.DataFrame, output: Path, excitation: str, setup: in
         ax_time.set_facecolor("#e7f6f7" if reference else ("#ebf6ec" if healthy else "#fdecec"))
         ax_time.set_ylabel(f"S{row.state}", rotation=0, labelpad=20, weight="bold")
         freq, power = welch(series - np.mean(series), fs=fs, nperseg=min(4096, len(series)))
+        spectra[row.state] = (freq, power)
+        state_colors[row.state] = color
         ax_psd.semilogy(freq, power + np.finfo(float).tiny, color=color, lw=0.9)
         ax_psd.set_facecolor(ax_time.get_facecolor())
         ax_psd.set_ylabel(f"S{row.state}", rotation=0, labelpad=20, weight="bold")
@@ -202,6 +206,86 @@ def signal_and_psd(frame: pd.DataFrame, output: Path, excitation: str, setup: in
     fig_signal.savefig(output / "signal_examples.png", dpi=180)
     fig_psd.savefig(output / "psd_examples.png", dpi=180)
     plt.close(fig_signal); plt.close(fig_psd)
+
+    # Normalize by energy in the forced 3--30 Hz band. This removes overall
+    # excitation amplitude while preserving peak locations and modal shape.
+    low, high = 3.0, min(30.0, fs / 2)
+    baseline_freq, _ = spectra["01"]
+    band = (baseline_freq >= low) & (baseline_freq <= high)
+    frequencies = baseline_freq[band]
+    normalized: dict[str, np.ndarray] = {}
+    for state, (freq, power) in spectra.items():
+        values = np.interp(frequencies, freq, power)
+        area = np.trapezoid(values, frequencies)
+        normalized[state] = values / max(area, np.finfo(float).tiny)
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+    for state in selected_states:
+        if state not in normalized:
+            continue
+        width = 2.2 if state == "01" else 1.2
+        alpha = 1.0 if state in {"01", "08"} else 0.75
+        ax.semilogy(frequencies, normalized[state], color=state_colors[state], lw=width,
+                    alpha=alpha, label=f"S{state} – {SCENARIOS[state]}")
+    ax.set(title=f"Energy-normalized PSD shape: {sensor}, {excitation.upper()} setup {setup:02d}",
+           xlabel="Frequency (Hz)", ylabel="Normalized PSD (area in 3–30 Hz = 1)",
+           xlim=(low, high))
+    ax.grid(alpha=0.2); ax.legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+    fig.savefig(output / "psd_normalized_overlay.png", dpi=180)
+    plt.close(fig)
+
+    # Ratio relative to S01 in dB. Red means more relative energy and blue less.
+    # The 0.20-Hz moving average is used for readability only.
+    eps = max(float(np.max(normalized["01"])) * 1e-10, np.finfo(float).tiny)
+    window_bins = max(3, int(round(0.20 / np.median(np.diff(frequencies)))))
+    if window_bins % 2 == 0:
+        window_bins += 1
+    kernel = np.ones(window_bins, dtype=float) / window_bins
+    ratios: dict[str, np.ndarray] = {}
+    for state, values in normalized.items():
+        raw = 10.0 * np.log10((values + eps) / (normalized["01"] + eps))
+        ratios[state] = np.convolve(raw, kernel, mode="same")
+    comparison_states = [s for s in selected_states if s != "01" and s in ratios]
+    all_values = np.concatenate([ratios[s] for s in comparison_states])
+    limit = float(np.clip(np.quantile(np.abs(all_values), 0.98), 3.0, 20.0))
+
+    fig, axes = plt.subplots(len(comparison_states), 1, figsize=(14, 11),
+                             sharex=True, sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, state in zip(axes, comparison_states):
+        values = ratios[state]
+        ax.plot(frequencies, values, color=state_colors[state], lw=1.0)
+        ax.fill_between(frequencies, 0, values, where=values >= 0,
+                        color="#d62728", alpha=0.28)
+        ax.fill_between(frequencies, 0, values, where=values < 0,
+                        color="#2166ac", alpha=0.28)
+        ax.axhline(0, color="black", lw=0.7)
+        ax.set_ylabel(f"S{state}", rotation=0, labelpad=24, weight="bold")
+        ax.set_ylim(-limit, limit)
+    axes[-1].set_xlabel("Frequency (Hz)")
+    fig.supylabel("Relative normalized PSD vs S01 (dB)")
+    fig.suptitle("Frequency-wise difference from healthy S01 (0.20 Hz smoothing)",
+                 weight="bold")
+    fig.tight_layout(rect=(0.02, 0, 1, 0.97))
+    fig.savefig(output / "psd_difference_vs_s01_db.png", dpi=180)
+    plt.close(fig)
+
+    matrix = np.vstack([ratios[state] for state in comparison_states])
+    fig, ax = plt.subplots(figsize=(15, 5.5))
+    image = ax.imshow(matrix, aspect="auto", origin="upper", cmap="RdBu_r",
+                      vmin=-limit, vmax=limit,
+                      extent=[frequencies[0], frequencies[-1],
+                              len(comparison_states) - 0.5, -0.5])
+    ax.set_yticks(range(len(comparison_states)),
+                  [f"S{s}: {SCENARIOS[s]}" for s in comparison_states])
+    ax.set(title="Damage-sensitive spectral difference map relative to S01",
+           xlabel="Frequency (Hz)", ylabel="Structural state")
+    cbar = fig.colorbar(image, ax=ax, pad=0.015)
+    cbar.set_label("Normalized PSD ratio vs S01 (dB): red = higher, blue = lower")
+    fig.tight_layout()
+    fig.savefig(output / "psd_difference_heatmap.png", dpi=180)
+    plt.close(fig)
 
 
 def score_audit(frame: pd.DataFrame, scores_path: Path, output: Path) -> None:
