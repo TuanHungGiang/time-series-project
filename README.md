@@ -25,6 +25,25 @@ ROC/PR curves, confusion matrix, checkpoint and full run metadata. For the most
 strict leave-one-setup-out calibration use `--cv-folds 9`; the default three
 setup-grouped folds are a faster smoke experiment and remain record-disjoint.
 
+### Paper-method experiment 1: Binomial Distribution Classifier
+
+The first threshold ablation follows the two-level alert/alarm equations from
+Kamali et al., MSSP 207 (2024) 110938. A sensor-window first crosses a
+healthy-tail alert threshold; a record becomes an alarm only when the binomial
+survival probability of observing that many alerts under S01 is below 0.01.
+No public author repository was found, so this is explicitly an equation-based
+Z24 adapter around the pinned official ScatterAD model, not author code.
+
+```python
+!python kaggle/z24_scatterad_bdc_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 1 --cv-folds 3 --batch-size 128 \
+  --alert-quantile 0.95 --alarm-alpha 0.01
+```
+
+Results are written to `/kaggle/working/z24_scatterad_bdc`, including the 18
+out-of-fold S01 BDC decisions needed to audit the claimed false-alarm control.
+
 ## Z24 all-record healthy-only anomaly split
 
 The repository also supports the raw-record Kaggle package
