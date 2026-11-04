@@ -8,6 +8,8 @@ Notebook usage (Internet + GPU enabled):
 """
 from __future__ import annotations
 
+import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +26,24 @@ def run(*command: str) -> None:
     subprocess.run(command, check=True)
 
 
-def find_dataset() -> tuple[Path, Path]:
-    matches = sorted(KAGGLE_INPUT.glob("*/metadata/records_manifest.csv"))
+def normalize_data_root(path: Path) -> Path:
+    path = path.expanduser().resolve()
+    if path.name in {"train", "val", "test", "_excluded", "metadata"}:
+        path = path.parent
+    return path
+
+
+def find_dataset(explicit_root: Path | None = None) -> tuple[Path, Path]:
+    if explicit_root is not None:
+        root = normalize_data_root(explicit_root)
+        manifest = root / "metadata" / "records_manifest.csv"
+        if not manifest.is_file():
+            raise FileNotFoundError(f"Manifest not found: {manifest}")
+        if not (root / "train" / "healthy").is_dir() or not (root / "test" / "damage").is_dir():
+            raise FileNotFoundError(f"Invalid Z24 split layout below: {root}")
+        return root, manifest
+
+    matches = sorted(KAGGLE_INPUT.rglob("metadata/records_manifest.csv"))
     valid = []
     for manifest in matches:
         root = manifest.parents[1]
@@ -41,7 +59,14 @@ def find_dataset() -> tuple[Path, Path]:
 
 
 def main() -> None:
-    data_root, manifest = find_dataset()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data-root", type=Path,
+        default=Path(os.environ["Z24_DATA_ROOT"]) if "Z24_DATA_ROOT" in os.environ else None,
+        help="Path to kaggle_z24_split or one of its train/val/test directories",
+    )
+    args = parser.parse_args()
+    data_root, manifest = find_dataset(args.data_root)
     print(f"dataset_root={data_root}", flush=True)
     print(f"manifest={manifest}", flush=True)
 
