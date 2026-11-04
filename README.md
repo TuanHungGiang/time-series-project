@@ -48,10 +48,11 @@ out-of-fold S01 BDC decisions needed to audit the claimed false-alarm control.
 
 This equation-based reproduction follows Nogueira et al., MSSP 261 (2026)
 115013. It intentionally uses a different, explicitly target-adaptive protocol:
-S01 setups 1--6 train the autoencoder, S01 setups 7--9 calibrate it, and S08
-setups 1--3 are target-healthy commissioning observations used only to estimate
-the latent Procrustes rotation. Those six S08 records are excluded from every
-reported metric; all damage records and S08 setups 4--9 form evaluation.
+S01 setups 1--6 train the autoencoder and S01 setups 7--9 calibrate it. Target
+alignment is cross-fitted by excitation: all nine S08 AVT setups align the FVT
+evaluation fold, then all nine S08 FVT setups align the AVT evaluation fold.
+Thus every setup is represented during commissioning, but no S08 record is
+evaluated by a transform that used that record; damage never enters alignment.
 
 ```python
 !python kaggle/z24_procrustes_ae_kaggle.py \
