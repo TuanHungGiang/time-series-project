@@ -63,6 +63,24 @@ evaluated by a transform that used that record; damage never enters alignment.
 The output `/kaggle/working/z24_procrustes_ae/metrics.csv` reports both the
 unaligned autoencoder and Procrustes-adapted result under the identical split.
 
+### Paper-method experiment 3: Dynamic Graph CNN + Transformer + Tail-p
+
+This strict S01-only equation adaptation follows Liu et al., RESS 252 (2024)
+110465. Vertical sensors remain graph nodes, top-k edges are inferred dynamically
+from spectral similarity, a Transformer models each sensor through successive
+windows, and empirical healthy tail probabilities produce the record score.
+S01 setups 1--6 train, setups 7--9 calibrate, and S08/damage are evaluation-only.
+
+```python
+!python kaggle/z24_graph_transformer_tailp_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 20 --patience 6
+```
+
+Outputs are saved to `/kaggle/working/z24_graph_transformer_tailp`. The run
+prints the number of S01 calibration records falsely alarmed, which must be
+reported alongside damage metrics.
+
 ## Z24 all-record healthy-only anomaly split
 
 The repository also supports the raw-record Kaggle package
