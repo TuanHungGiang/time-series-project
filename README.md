@@ -1,5 +1,23 @@
 # z24-prism
 
+## Restored primary strict baseline: ACF + Robust PCA
+
+After the BDC, Procrustes and Graph-Transformer paper-method ablations failed
+the locked criteria, the primary zero-target baseline is again the original
+permutation-invariant ACF sensor-set representation with RobustScaler/PCA.
+Complete MAT records are six-fold cross-fit groups; S01 alone fits every
+transform and threshold, validation damage states choose the decision rule,
+and S08 plus locked damage states are opened only for final reporting.
+
+```python
+!python kaggle/z24_strict_acf_pca_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
+```
+
+Outputs are saved to `/kaggle/working/z24_strict_acf_pca`. This is the restored
+control, not a claim of high detection performance; its historical locked-test
+AUROC is about 0.695 while thresholded recall remains low.
+
 ## Strict S01-only PSD + ScatterAD baseline (no target leakage)
 
 This experiment uses the pinned official
