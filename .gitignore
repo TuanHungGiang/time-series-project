@@ -21,3 +21,5 @@ __pycache__/
 *.ipynb
 !kaggle_z24_tspulse_xgb_guided.ipynb
 granite-tsfm-main/
+.deps/
+.smoke*/
