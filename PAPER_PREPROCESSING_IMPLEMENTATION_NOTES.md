@@ -89,7 +89,10 @@ The existing `run_z24_graph_transformer_tailp.py` reproduces moving-window
 preprocessing, dynamic nearest-neighbour graph construction, Transformer
 temporal encoding and empirical Tail-p scoring. Its Z24 graph is inferred from
 spectral similarity because a common physical node topology does not exist
-across the roving setups. No public author repository was found.
+across the roving setups. No public author repository was found. The paper
+suite invokes it with `--paper-split`, which uses the same damage-validation
+and locked-test states as the two new runners; omitting the flag preserves the
+earlier all-state strict experiment.
 
 ## Smoke-test status
 
