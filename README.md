@@ -310,6 +310,38 @@ augmented. Add `--no_augment` for a no-augmentation ablation on this pipeline.
 
 ## Run on Kaggle
 
+### Modern Z24 baseline suite
+
+Run the original baseline pipelines before changing their preprocessing:
+
+```python
+!git clone https://github.com/TuanHungGiang/time-series-project.git
+%cd time-series-project
+!pip install -q -r requirements.txt
+!python -u kaggle/z24_modern_baselines_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --models scatterad,target_source,procrustes,graph_tailp,mdfa
+```
+
+The suite runs official ScatterAD (pinned NeurIPS 2025 source), the two MSSP
+2026 domain-alignment experiments, the RESS Graph-Transformer Tail-p adaptation,
+and the Information Fusion 2026 MDFA workflow reproduction. Outputs remain in
+separate `/kaggle/working/z24_*` folders and a union of their `metrics.csv`
+files is saved as `/kaggle/working/z24_modern_baselines_summary.csv`.
+
+For a short first run:
+
+```python
+!python -u kaggle/z24_modern_baselines_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --models scatterad,target_source,procrustes \
+  --scatter-epochs 1 --mapping-epochs 50 --procrustes-epochs 50
+```
+
+This suite establishes the unmodified baselines. It does not yet label CM-HRR
+as paper preprocessing; the next ablation must add the identical CM-HRR adapter
+to each baseline and compare it against these saved controls.
+
 ### Leak-free CM-HRR preprocessing benchmark
 
 `run_z24_cm_hrr_benchmark.py` compares the same four healthy-only detectors
