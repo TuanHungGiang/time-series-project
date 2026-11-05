@@ -1,5 +1,47 @@
 # z24-prism
 
+## Elsevier IF>10 paper-preprocessing experiments
+
+This suite keeps the paper workflows separate instead of mixing them into a
+new proposed preprocessor:
+
+1. `run_z24_mdfa_paper.py`: Mousavi et al., *Information Fusion* 126
+   (2026) 103534. It reproduces linear detrending, a Welch-derived Butterworth
+   cutoff, raw/time/frequency/db4-wavelet branches and latent multi-domain
+   fusion. No public author repository was found, so this is a disclosed
+   workflow reproduction. Because the Z24 PDT uses 15--17 roving channels,
+   sensor-windows are modeled without fake padding.
+2. `run_z24_timevertex_paper.py`: Niresi et al., *Reliability Engineering &
+   System Safety* 270 (2026) 112153. It reproduces statistical/spectral sensor
+   descriptors, clustering, graph-central representative selection, a
+   healthy-only autoencoder and the paper's healthy-validation
+   `mean + 2*std` threshold. The apparent author `Code` link resolves to
+   `PEGNN_SS`, which is code for a different paper, so it is not used.
+3. `run_z24_graph_transformer_tailp.py`: Liu et al., *Reliability Engineering
+   & System Safety* 252 (2024) 110465. It retains the previously implemented
+   moving-window, dynamic-graph, Transformer and Tail-p experiment.
+
+For the MDFA and Time-Vertex runs, S01 setups 1--6 are healthy training, S01
+setups 7--9 are healthy calibration, states 04/05/06/10/14/16/17 form the
+damage validation set, and S08 plus states 03/07/09/11/12/13/15 are the locked
+mixed healthy/damage test. Damage validation is never used in gradient fitting
+or threshold estimation. It is nevertheless an opened development set, which
+is recorded in every output's metadata.
+
+Kaggle command:
+
+```python
+!pip install -q -r requirements.txt
+!python kaggle/z24_paper_preprocessing_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
+  --epochs 30 --patience 8 --batch-size 256
+```
+
+Use `--skip-mdfa`, `--skip-timevertex`, or `--skip-edgeconv` to run one paper
+at a time. All scripts save train/healthy-validation curves, locked-test
+confusion matrices, record/state scores, metrics, checkpoints, and an explicit
+reproduction/adaptation audit.
+
 ## Restored primary strict baseline: ACF + Robust PCA
 
 After the BDC, Procrustes and Graph-Transformer paper-method ablations failed
