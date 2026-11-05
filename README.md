@@ -310,6 +310,30 @@ augmented. Add `--no_augment` for a no-augmentation ablation on this pipeline.
 
 ## Run on Kaggle
 
+### Leak-free CM-HRR preprocessing benchmark
+
+`run_z24_cm_hrr_benchmark.py` compares the same four healthy-only detectors
+(OCSVM, robust-PCA reconstruction, Isolation Forest, and a small autoencoder)
+on raw energy-normalised log-PSD versus condition-matched healthy-reference
+residualisation (CM-HRR). All reference/scaling/model statistics use only
+`S01/train`; `S01/val` sets a healthy-only threshold, while `S01/test`, `S08`,
+and all damage records remain evaluation-only. For setup holdouts, reference
+selection falls back without leakage: `setup+excitation -> excitation -> global`.
+
+```python
+!git clone https://github.com/TuanHungGiang/time-series-project.git
+%cd time-series-project
+!python -u kaggle/z24_cm_hrr_benchmark_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --models ocsvm,pca,iforest,ae --epochs 50 --patience 10
+```
+
+Outputs are written to `/kaggle/working/z24_cm_hrr_benchmark`, including
+`metrics.csv`, `cm_hrr_deltas.csv`, per-record/state scores, reference audits,
+and `cm_hrr_model_comparison.png`. A useful preprocessing must improve more
+than one detector; the script reports per-model AUROC and balanced-accuracy
+deltas rather than selecting CM-HRR from damage labels.
+
 `kaggle/z24_prism_kaggle.py` clones this repo and PRISM, downloads the data from Hugging Face and trains both
 splits. Enable GPU and Internet; for a private repo add a `GITHUB_TOKEN` Kaggle secret. Edit the id in
 `kaggle/kernel-metadata.json`, then:
@@ -439,3 +463,4 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 ```
 
 Ablation without augmentation: add `--no_augment`.
+
