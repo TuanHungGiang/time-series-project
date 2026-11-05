@@ -21,7 +21,7 @@ new proposed preprocessor:
    & System Safety* 252 (2024) 110465. It retains the previously implemented
    moving-window, dynamic-graph, Transformer and Tail-p experiment.
 
-For the MDFA and Time-Vertex runs, S01 setups 1--6 are healthy training, S01
+For all three suite runs, S01 setups 1--6 are healthy training, S01
 setups 7--9 are healthy calibration, states 04/05/06/10/14/16/17 form the
 damage validation set, and S08 plus states 03/07/09/11/12/13/15 are the locked
 mixed healthy/damage test. Damage validation is never used in gradient fitting
@@ -140,55 +140,6 @@ S01 setups 1--6 train, setups 7--9 calibrate, and S08/damage are evaluation-only
 Outputs are saved to `/kaggle/working/z24_graph_transformer_tailp`. The run
 prints the number of S01 calibration records falsely alarmed, which must be
 reported alongside damage metrics.
-
-## Z24 all-record healthy-only anomaly split
-
-The repository also supports the raw-record Kaggle package
-`z24-bridge-all-records-anomaly-split`. It inventories 306 MAT files, excludes
-the 18 ambiguous state-02 installation records, trains on 24 whole healthy
-records only, and evaluates on independent validation/test records containing
-six healthy plus 126 damage recordings each. Damage states are exclusive across
-validation and test.
-
-The initial baseline uses the authors' CATCH implementation without modifying
-its architecture/loss. It trains one model per `AVT/FVT x setup` configuration
-so channel indices from different roving-sensor layouts are never conflated.
-
-On Kaggle, attach the dataset, enable Internet and GPU, then run:
-
-```python
-!git clone https://github.com/TuanHungGiang/time-series-project.git
-%cd time-series-project
-!python kaggle/z24_all_records_kaggle.py
-```
-
-Outputs are written to `/kaggle/working/z24_all_records_catch`. The portable
-dataset manifest is discovered automatically under `/kaggle/input`.
-
-For a deeply nested Kaggle input path, pass either the package root or its
-`train` directory explicitly:
-
-```python
-!python kaggle/z24_all_records_kaggle.py \
-  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
-```
-
-### ScatterAD (NeurIPS 2025) shared-sensor baseline
-
-To avoid the unstable calibration of 18 separate CATCH models, run one shared
-ScatterAD model over all healthy sensor windows. This keeps the authors'
-architecture, loss and scoring rule, while using a disclosed univariate-sensor
-adapter so 15/16/17-channel records share one score space:
-
-```python
-!python kaggle/z24_scatterad_shared_kaggle.py \
-  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
-  --epochs 2 --batch-size 128
-```
-
-Results are written to `/kaggle/working/z24_scatterad_shared`. The bootstrap
-pins the official author repository and applies the disclosed one-line fix for
-normalizing its one-dimensional center vector.
 
 Train [PRISM](https://github.com/fedezuc/PRISM) (a lightweight multivariate time-series classifier) on the
 processed Z24 bridge dataset, [thanglexuan/Z24-dataset-processed](https://huggingface.co/datasets/thanglexuan/Z24-dataset-processed):
@@ -460,25 +411,3 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 
 Ablation without augmentation: add `--no_augment`.
 
-
-## Audit the Z24 healthy/damage split
-
-Z24 progressive-damage labels describe the structural condition during an
-entire MAT acquisition. They are not timestamps inside a recording. Generate a
-state-by-record split map, chronology, comparable waveforms and PSD plots with:
-
-```python
-!python visualize_z24_split_labels.py \
-  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
-```
-
-State 01 is the initial undamaged reference. State 08 is displayed separately
-as the post-lifting reference, even though its binary label is healthy. State 02
-is an installation/transition state and is excluded. To identify the exact
-healthy validation record that set ScatterAD's threshold, add:
-
-```python
-!python visualize_z24_split_labels.py \
-  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train \
-  --scores /kaggle/working/z24_scatterad_shared/record_scores.csv
-```
