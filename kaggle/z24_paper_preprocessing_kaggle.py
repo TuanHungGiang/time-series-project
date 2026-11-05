@@ -37,7 +37,7 @@ def main() -> None:
             "--output", "/kaggle/working/z24_timevertex_paper")
     if not args.skip_edgeconv:
         edgeconv = ["--manifest", manifest, "--data-root", root, "--epochs", args.epochs,
-                    "--patience", args.patience]
+                    "--patience", args.patience, "--paper-split"]
         run(sys.executable, "-u", PROJECT / "run_z24_graph_transformer_tailp.py", *edgeconv,
             "--output", "/kaggle/working/z24_edgeconvformer_paper")
 
