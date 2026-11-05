@@ -142,16 +142,23 @@ def main():
     p.add_argument("--tail-quantile", type=float, default=.95)
     p.add_argument("--record-fraction", type=float, default=.20); p.add_argument("--seed", type=int, default=42)
     p.add_argument("--paper-split", action="store_true",
-                   help="Use mixed damage validation and locked S08+damage test instead of evaluating all states")
+                   help="Respect the exported manifest train/val/test partitions")
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frame = base.resolve_manifest(args.manifest, args.data_root)
-    train_rows = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].copy()
-    cal_rows = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].copy()
-    validation_rows = frame[frame.state.isin(VAL_DAMAGE)].copy() if args.paper_split else frame.iloc[0:0].copy()
-    evaluation = (frame[frame.state.isin({"08"} | TEST_DAMAGE)].copy() if args.paper_split
-                  else frame[~frame.state.isin(["01", "02"])].copy())
+    if args.paper_split:
+        train_rows = frame[(frame.split == "train") & (frame.label == 0)].copy()
+        cal_rows = frame[(frame.split == "val") & (frame.label == 0)].copy()
+        validation_rows = frame[(frame.split == "val") & (frame.label == 1)].copy()
+        evaluation = frame[frame.split == "test"].copy()
+        if (len(train_rows), len(cal_rows), len(validation_rows), len(evaluation)) != (24, 6, 126, 132):
+            raise ValueError("Unexpected manifest split; expected train/cal/val-damage/test = 24/6/126/132")
+    else:
+        train_rows = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].copy()
+        cal_rows = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].copy()
+        validation_rows = frame.iloc[0:0].copy()
+        evaluation = frame[~frame.state.isin(["01", "02"])].copy()
     feature_args = (args.fs, args.raw_window, args.stride, args.psd_bins, args.fmin, args.fmax)
     cache = {}
     feature_groups = [("train", train_rows), ("cal", cal_rows)]
@@ -173,7 +180,7 @@ def main():
     time_threshold = float(np.quantile(cal_time_scores, args.tail_quantile))
     cal_fractions = [record_tail_score(record_error(model, x, device), train_errors,
                                        time_threshold)[0] for x in cal]
-    print(f"S01 calibration time_threshold={time_threshold:.6f} fractions={cal_fractions}", flush=True)
+    print(f"healthy calibration time_threshold={time_threshold:.6f} fractions={cal_fractions}", flush=True)
     def score_rows(source, split):
         rows = []
         for row in source.itertuples():
@@ -207,11 +214,12 @@ def main():
     sy, sp = states.label.to_numpy(), states.alarm.astype(int).to_numpy()
     tn, fp, fn, tp = confusion_matrix(sy, sp, labels=[0, 1]).ravel()
     summary = {"method": "DynamicGraphCNN_Transformer_TailP_RESS2024_equation_adaptation",
-               "damage_used_for_fit": False, "s08_used_for_fit": False,
+               "damage_used_for_fit": False,
+               "s08_used_for_fit": bool((train_rows.state == "08").any()),
                "paper_damage_validation_split": bool(args.paper_split),
                "damage_validation_opened_before_locked_test": bool(args.paper_split),
                "epochs_run": int(history.epoch.max()), "seconds": time.time() - started,
-               "s01_calibration_alarm_records": int(sum(x > args.record_fraction for x in cal_fractions)),
+               "healthy_calibration_alarm_records": int(sum(x > args.record_fraction for x in cal_fractions)),
                **{f"validation_{k}": v for k, v in validation_metrics.items()},
                **{f"record_{k}": v for k, v in result.items()},
                "state_tn": int(tn), "state_fp": int(fp), "state_fn": int(fn), "state_tp": int(tp),
@@ -222,14 +230,14 @@ def main():
                 "args": vars(args)}, args.output / "model.pt")
     meta = {"paper": "Liu et al., Structural damage detection and localization via an unsupervised anomaly detection method, RESS 252 (2024) 110465",
             "doi": "10.1016/j.ress.2024.110465", "implementation_scope": "equation-based healthy reconstruction adaptation; no public author code found",
-            "strict_protocol": ("S01 setups 1-6 train, S01 setups 7-9 calibrate, damage validation states "
-                                f"{sorted(VAL_DAMAGE)}, locked S08+damage test {sorted(TEST_DAMAGE)}"
+            "strict_protocol": ("manifest train: 24 healthy; manifest val: 6 healthy + 126 damage; "
+                                "manifest test: 6 healthy + 126 damage"
                                 if args.paper_split else
                                 "S01 setups 1-6 train, S01 setups 7-9 calibrate, S08/damage evaluation-only"),
             "parameters": vars(args)}
     (args.output / "run_metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8)); axes[0].plot(history.epoch, history.train_loss, label="train")
-    axes[0].plot(history.epoch, history.val_healthy_loss, label="S01 cal"); axes[0].legend(); axes[0].set_title("Reconstruction loss")
+    axes[0].plot(history.epoch, history.val_healthy_loss, label="healthy cal"); axes[0].legend(); axes[0].set_title("Reconstruction loss")
     fpr, tpr, _ = roc_curve(records.label, records.tail_fraction); axes[1].plot(fpr, tpr, label=f"AUROC={result['auroc']:.3f}")
     axes[1].plot([0,1],[0,1],"--",color="gray"); axes[1].legend(); axes[1].set_title("Record ROC")
     ConfusionMatrixDisplay(confusion_matrix(sy, sp, labels=[0,1]), display_labels=["Healthy","Damage"]).plot(ax=axes[2],cmap="Greens",colorbar=False)
@@ -240,4 +248,3 @@ def main():
 
 
 if __name__ == "__main__": main()
-

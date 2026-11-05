@@ -7,11 +7,11 @@ author implementations in a paper.
 
 ## Shared evaluation protocol
 
-- Training: state 01, setups 1--6, 12 healthy MAT records.
-- Healthy calibration and early stopping: state 01, setups 7--9, 6 records.
-- Damage validation: states 04, 05, 06, 10, 14, 16 and 17.
-- Locked test: state 08 healthy plus damage states 03, 07, 09, 11, 12, 13
-  and 15.
+- Training: the manifest `train` partition, 24 healthy MAT records (S01/S08).
+- Healthy calibration and early stopping: the six healthy records in manifest
+  `val`.
+- Damage validation: the 126 damage records in manifest `val`.
+- Locked test: all 132 records in manifest `test` (six healthy and 126 damage).
 - Splitting is performed before windowing. No window from one MAT record can
   occur in more than one split.
 - Damage validation is not used in gradient fitting, scaling or threshold
@@ -63,7 +63,9 @@ Reproduced components:
 Adaptation required by Z24:
 
 - A separate healthy graph is learned for every `AVT/FVT x setup` because the
-  Z24 PDT does not contain one fixed sensor graph.
+  Z24 PDT does not contain one fixed sensor graph.  Graphs use only manifest
+  `train` healthy records.  The S01/S08 train union covers all 18
+  excitation/setup configurations.
 - Sensor selection is stored by physical channel name, not array index.
 - A real schema mismatch was discovered during smoke testing: S01 FVT setup 09
   has 17 vertical channels, while S09 FVT setup 09 has 15; `99V` and `512V`
@@ -94,10 +96,17 @@ suite invokes it with `--paper-split`, which uses the same damage-validation
 and locked-test states as the two new runners; omitting the flag preserves the
 earlier all-state strict experiment.
 
-## Smoke-test status
+## Manifest-split smoke-test status
 
-Both new runners completed one-epoch end-to-end tests over all 288 required
-records using the local manifest. Those smoke metrics are implementation tests,
-not scientific results, and are excluded from version control. Full Kaggle
-runs must use the default feature resolution and a meaningful epoch budget.
+Both runners completed one-epoch end-to-end tests over all 288 required
+records. These reduced-resolution runs verify the data path only and are not
+scientific results:
 
+| preprocessing | test balanced accuracy | test AUROC | damage recall | specificity |
+|---|---:|---:|---:|---:|
+| Time-Vertex sensor selection | 0.5556 | 0.5648 | 0.1111 | 1.0000 |
+| MDFA multi-domain features | 0.5198 | 0.4934 | 0.0397 | 1.0000 |
+| EdgeConvFormer dynamic graph + Tail-p | 0.4643 | 0.4808 | 0.0952 | 0.8333 |
+
+Full Kaggle runs must use the default feature resolution and a meaningful
+epoch budget. The smoke outputs are excluded from version control.

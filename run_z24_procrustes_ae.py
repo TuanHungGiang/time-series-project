@@ -1,15 +1,10 @@
-"""Z24 adaptation of the MSSP 2026 autoencoder + Procrustes framework.
+"""Natural-frequency AE + orthogonal Procrustes on the exported Z24 split.
 
-Protocol (record-disjoint and damage-blind):
-* AE train: S01 setups 1--6 (12 records)
-* healthy calibration: S01 setups 7--9 (6 records)
-* target commissioning alignment: all nine S08 setups from one excitation
-* evaluation: the opposite-excitation S08 records and damage records
-
-Two cross-fit directions (AVT -> FVT and FVT -> AVT) ensure every evaluated S08
-record is scored by a transform that did not use it.  This is not the zero-target
-S01-only protocol; it is the paper's target-healthy adaptation setting.  No
-public author code was found, so this is an equation-based reproduction.
+Paper method: Nogueira, Figueiredo and da Silva, MSSP 261 (2026) 115013.
+The source autoencoder is trained only on S01 healthy training observations.
+The orthogonal rotation is estimated only from S01/S08 healthy observations in
+the manifest training partition. Validation damage and locked test records are
+never used for scaling, fitting, alignment, or threshold estimation.
 """
 from __future__ import annotations
 
@@ -26,210 +21,214 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from scipy.signal import find_peaks, welch
 from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, roc_curve
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 import run_z24_strict_psd_scatterad as base
+import z24_modal_transfer_common as modal
 
 
-def modal_features(path: Path, fs: float, fmin: float, fmax: float,
-                   modes: int, min_separation_hz: float) -> np.ndarray:
-    values = base.vertical_values(path)
-    spectra = []
-    for channel in range(values.shape[1]):
-        x = values[:, channel] - np.mean(values[:, channel])
-        f, p = welch(x, fs=fs, nperseg=min(8192, len(x)), noverlap=4096)
-        spectra.append(p)
-    spectrum = np.median(np.stack(spectra), axis=0)
-    band = (f >= fmin) & (f <= fmax); fb, pb = f[band], spectrum[band]
-    step = float(np.median(np.diff(fb)))
-    peaks, _ = find_peaks(np.log10(pb + np.finfo(float).tiny),
-                          distance=max(1, int(min_separation_hz / step)), prominence=.05)
-    candidates = list(peaks[np.argsort(pb[peaks])[::-1]])
-    if len(candidates) < modes:
-        candidates.extend(i for i in np.argsort(pb)[::-1] if i not in candidates)
-    chosen = sorted(candidates[:modes], key=lambda i: fb[i])
-    if len(chosen) != modes: raise ValueError(f"Cannot extract {modes} modes from {path}")
-    return fb[chosen].astype(np.float32)
-
-
-class AE(nn.Module):
-    def __init__(self, features: int, latent: int):
+class SourceAE(nn.Module):
+    def __init__(self, features: int, latent: int, dropout: float):
         super().__init__()
-        self.encoder = nn.Sequential(nn.Linear(features, 16), nn.LeakyReLU(.01),
-                                     nn.Linear(16, 8), nn.LeakyReLU(.01),
-                                     nn.Linear(8, latent))
-        self.decoder = nn.Sequential(nn.Linear(latent, 8), nn.LeakyReLU(.01),
-                                     nn.Linear(8, 16), nn.LeakyReLU(.01),
-                                     nn.Linear(16, features))
-    def forward(self, x): return self.decoder(self.encoder(x))
+        self.encoder = nn.Sequential(
+            nn.Linear(features, 16), nn.LeakyReLU(.01), nn.Dropout(dropout),
+            nn.Linear(16, 8), nn.LeakyReLU(.01), nn.Dropout(dropout),
+            nn.Linear(8, latent), nn.Dropout(dropout),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent, 8), nn.LeakyReLU(.01),
+            nn.Linear(8, 16), nn.LeakyReLU(.01), nn.Linear(16, features),
+        )
+
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
 
 
-def standardizer(x: np.ndarray):
-    center = np.median(x, axis=0)
-    scale = 1.4826 * np.median(np.abs(x - center), axis=0)
-    scale[scale < 1e-6] = 1.0
-    return center.astype(np.float32), scale.astype(np.float32)
+def loader(x: np.ndarray, batch: int, shuffle: bool) -> DataLoader:
+    return DataLoader(TensorDataset(torch.from_numpy(x)), batch_size=batch,
+                      shuffle=shuffle, num_workers=0)
 
 
-def tx(x, center, scale): return ((x - center) / scale).astype(np.float32)
-
-
-def train_ae(train_x, val_x, args, device):
-    model = AE(train_x.shape[1], args.latent).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    train_t = torch.tensor(train_x, device=device); val_t = torch.tensor(val_x, device=device)
-    best, best_state, patience = float("inf"), None, 0; rows = []
-    for epoch in range(1, args.epochs + 1):
-        model.train(); optimizer.zero_grad(set_to_none=True)
-        loss = torch.mean((model(train_t) - train_t) ** 2); loss.backward(); optimizer.step()
-        model.eval()
-        with torch.no_grad(): val = torch.mean((model(val_t) - val_t) ** 2)
-        rows.append({"epoch": epoch, "train_loss": float(loss.detach()), "val_healthy_loss": float(val)})
-        if float(val) < best - 1e-8:
-            best, best_state, patience = float(val), copy.deepcopy(model.state_dict()), 0
-        else: patience += 1
-        if epoch == 1 or epoch % 25 == 0:
-            print(f"epoch={epoch}/{args.epochs} train={float(loss.detach()):.6f} val={float(val):.6f}", flush=True)
-        if patience >= args.patience: break
-    model.load_state_dict(best_state); return model, pd.DataFrame(rows)
+@torch.no_grad()
+def reconstruction_errors(model, x, device, rotation=None):
+    model.eval(); xt = torch.from_numpy(x).to(device); z = model.encoder(xt)
+    if rotation is not None:
+        z = z @ torch.from_numpy(rotation).to(device)
+    return torch.mean((model.decoder(z) - xt) ** 2, dim=1).cpu().numpy()
 
 
 @torch.no_grad()
 def encode(model, x, device):
-    return model.encoder(torch.tensor(x, device=device)).cpu().numpy()
+    model.eval()
+    return model.encoder(torch.from_numpy(x).to(device)).cpu().numpy()
 
 
-@torch.no_grad()
-def reconstruction_error(model, x, device, transform=None):
-    xt = torch.tensor(x, device=device); z = model.encoder(xt)
-    if transform is not None:
-        rotation, target_mean, source_mean = transform
-        z = (z - torch.tensor(target_mean, device=device)) @ torch.tensor(rotation, device=device)
-        z = z + torch.tensor(source_mean, device=device)
-    prediction = model.decoder(z)
-    return torch.mean((prediction - xt) ** 2, dim=1).cpu().numpy()
+def fit_rotation(source_z: np.ndarray, target_z: np.ndarray) -> np.ndarray:
+    # Equation (4): min_R ||Z_t R - Z_s||_F^2, subject to R^T R = I.
+    n = min(len(source_z), len(target_z))
+    u, _, vt = np.linalg.svd(target_z[:n].T @ source_z[:n], full_matrices=False)
+    return (u @ vt).astype(np.float32)
 
 
-def fit_procrustes(source_z, target_z):
-    source_mean = source_z.mean(0, keepdims=True); target_mean = target_z.mean(0, keepdims=True)
-    u, _, vt = np.linalg.svd((target_z - target_mean).T @ (source_z - source_mean), full_matrices=False)
-    rotation = (u @ vt).astype(np.float32)
-    return rotation, target_mean.astype(np.float32), source_mean.astype(np.float32)
+def train_source_ae(train, validation, args, device):
+    model = SourceAE(train.shape[1], args.latent, args.dropout).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                 weight_decay=args.weight_decay)
+    best, state, stale, history = float("inf"), None, 0, []
+    for epoch in range(1, args.epochs + 1):
+        model.train(); losses = []
+        for (x,) in loader(train, args.batch_size, True):
+            x = x.to(device); optimizer.zero_grad(set_to_none=True)
+            loss = torch.mean((model(x) - x) ** 2); loss.backward(); optimizer.step()
+            losses.append(float(loss.detach()))
+        val = float(reconstruction_errors(model, validation, device).mean())
+        tr = float(np.mean(losses)); history.append({"epoch": epoch, "train_loss": tr,
+                                                      "source_val_loss": val})
+        if val < best - 1e-8:
+            best, state, stale = val, copy.deepcopy(model.state_dict()), 0
+        else:
+            stale += 1
+        if epoch == 1 or epoch % 25 == 0:
+            print(f"epoch={epoch}/{args.epochs} train={tr:.6f} source_val={val:.6f}", flush=True)
+        if stale >= args.patience:
+            break
+    if state is None:
+        raise RuntimeError("No source AE checkpoint")
+    model.load_state_dict(state)
+    return model, pd.DataFrame(history)
 
 
-def evaluate(frame, scores, threshold, name):
-    part = frame.copy(); part["score"] = scores; part["alarm"] = part.score > threshold
-    result = base.metrics(part.label, part.score, threshold)
-    states = part.groupby(["state", "scenario", "label"], as_index=False).agg(
-        records=("record_id", "size"), score=("score", "median"), alarm_rate=("alarm", "mean"))
-    states["alarm"] = states.alarm_rate >= .5
-    y, pred = states.label.to_numpy(), states.alarm.astype(int).to_numpy()
-    tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
-    state = {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
-             "accuracy": float((y == pred).mean())}
-    return part, states, {"method": name, **{f"record_{k}": v for k, v in result.items()},
-                          **{f"state_{k}": v for k, v in state.items()}}
-
-
-def main() -> None:
+def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--manifest", type=Path, required=True); p.add_argument("--data-root", type=Path, required=True)
+    p.add_argument("--manifest", type=Path, required=True)
+    p.add_argument("--data-root", type=Path, required=True)
     p.add_argument("--output", type=Path, default=Path("/kaggle/working/z24_procrustes_ae"))
-    p.add_argument("--epochs", type=int, default=300); p.add_argument("--patience", type=int, default=50)
-    p.add_argument("--lr", type=float, default=1e-3); p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--latent", type=int, default=2); p.add_argument("--fs", type=float, default=50.)
-    p.add_argument("--fmin", type=float, default=3.); p.add_argument("--fmax", type=float, default=20.)
-    p.add_argument("--modes", type=int, default=3); p.add_argument("--min-separation-hz", type=float, default=.3)
-    p.add_argument("--calibration-quantile", type=float, default=.98); p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--epochs", type=int, default=600)
+    p.add_argument("--patience", type=int, default=75)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--lr", type=float, default=.003)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--dropout", type=float, default=.2)
+    p.add_argument("--latent", type=int, default=2)
+    p.add_argument("--fs", type=float, default=50.)
+    p.add_argument("--window", type=int, default=8192)
+    p.add_argument("--stride", type=int, default=4096)
+    p.add_argument("--fmin", type=float, default=3.)
+    p.add_argument("--fmax", type=float, default=20.)
+    p.add_argument("--modes", type=int, default=6)
+    p.add_argument("--mode-separation", type=float, default=.5)
+    p.add_argument("--tracking-radius", type=float, default=.45)
+    p.add_argument("--threshold-quantile", type=float, default=.99)
+    p.add_argument("--record-quantile", type=float, default=.95)
+    p.add_argument("--seed", type=int, default=42)
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    frame = base.resolve_manifest(args.manifest, args.data_root)
-    source_train = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].copy()
-    source_cal = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].copy()
-    source_all = frame[frame.state == "01"].copy()
-    target_all = frame[frame.state == "08"].copy()
-    damage_all = frame[~frame.state.isin(["01", "02", "08"])].copy()
-    groups = {"source_train": source_train, "source_cal": source_cal,
-              "source_alignment": source_all, "target_S08": target_all,
-              "damage_evaluation": damage_all}
-    cache = {}
-    for group, rows in groups.items():
-        for i, row in enumerate(rows.itertuples(), 1):
-            cache[row.record_id] = modal_features(row.path, args.fs, args.fmin, args.fmax,
-                                                   args.modes, args.min_separation_hz)
-        print(f"features {group}={len(rows)}", flush=True)
-    x_train = np.stack([cache[x] for x in source_train.record_id]); center, scale = standardizer(x_train)
-    x_train = tx(x_train, center, scale)
-    x_cal = tx(np.stack([cache[x] for x in source_cal.record_id]), center, scale)
-    started = time.time(); model, history = train_ae(x_train, x_cal, args, device)
-    history.to_csv(args.output / "training_history.csv", index=False)
-    cal_errors = reconstruction_error(model, x_cal, device)
-    threshold = float(np.quantile(cal_errors, args.calibration_quantile))
 
-    raw_parts, aligned_parts, evaluation_parts, transforms = [], [], [], {}
-    # Cross-fit target adaptation: every setup is represented in commissioning,
-    # while each evaluated S08 record is scored by a transform fitted only on
-    # the opposite excitation. Damage records are never used for alignment.
-    for adapt_excitation, eval_excitation in (("avt", "fvt"), ("fvt", "avt")):
-        source_align_rows = source_all[source_all.excitation == adapt_excitation].sort_values("setup")
-        target_align_rows = target_all[target_all.excitation == adapt_excitation].sort_values("setup")
-        evaluation = pd.concat([
-            target_all[target_all.excitation == eval_excitation],
-            damage_all[damage_all.excitation == eval_excitation],
-        ], ignore_index=True).sort_values(["state", "setup"])
-        source_align = tx(np.stack([cache[x] for x in source_align_rows.record_id]), center, scale)
-        target_align = tx(np.stack([cache[x] for x in target_align_rows.record_id]), center, scale)
-        transform = fit_procrustes(encode(model, source_align, device),
-                                   encode(model, target_align, device))
-        x_eval = tx(np.stack([cache[x] for x in evaluation.record_id]), center, scale)
-        raw_parts.append(reconstruction_error(model, x_eval, device))
-        aligned_parts.append(reconstruction_error(model, x_eval, device, transform))
-        evaluation["protocol_fold"] = f"adapt_{adapt_excitation}_test_{eval_excitation}"
-        evaluation_parts.append(evaluation)
-        transforms[adapt_excitation] = transform
-    evaluation = pd.concat(evaluation_parts, ignore_index=True)
-    raw_scores = np.concatenate(raw_parts); aligned_scores = np.concatenate(aligned_parts)
-    raw_records, raw_states, raw_result = evaluate(evaluation, raw_scores, threshold, "AE_modal_no_alignment")
-    aligned_records, aligned_states, aligned_result = evaluate(
-        evaluation, aligned_scores, threshold, "AE_modal_Procrustes_MSSP2026_equation_reproduction")
-    raw_records.to_csv(args.output / "record_scores_no_alignment.csv", index=False)
-    aligned_records.to_csv(args.output / "record_scores_procrustes.csv", index=False)
-    raw_states.to_csv(args.output / "state_scores_no_alignment.csv", index=False)
-    aligned_states.to_csv(args.output / "state_scores_procrustes.csv", index=False)
-    results = pd.DataFrame([raw_result, aligned_result]); results["seconds"] = time.time() - started
-    results.to_csv(args.output / "metrics.csv", index=False)
-    torch.save({"state_dict": model.state_dict(), "center": center, "scale": scale,
-                "transforms": transforms, "threshold": threshold, "args": vars(args)}, args.output / "model.pt")
-    metadata = {"paper": "Nogueira et al., integrated AE-based unsupervised domain adaptation, MSSP 261 (2026) 115013",
-                "doi": "10.1016/j.ymssp.2026.115013",
-                "implementation_scope": "equation-based PDT adapter; architecture reduced for 12 source records",
-                "important_protocol_change": (
-                    "two cross-fit target folds: all nine S08 AVT records align the FVT evaluation fold, "
-                    "then all nine S08 FVT records align the AVT evaluation fold; no record is evaluated "
-                    "by a transform that used it"
-                ),
-                "damage_used_for_fit": False, "evaluation_records": len(evaluation), "parameters": vars(args)}
+    frame = base.resolve_manifest(args.manifest, args.data_root)
+    source_train = frame[(frame.split == "train") & (frame.label == 0) & (frame.state == "01")].copy()
+    target_train = frame[(frame.split == "train") & (frame.label == 0) & (frame.state == "08")].copy()
+    source_val = frame[(frame.split == "val") & (frame.label == 0) & (frame.state == "01")].copy()
+    target_val = frame[(frame.split == "val") & (frame.label == 0) & (frame.state == "08")].copy()
+    val_rows = frame[frame.split == "val"].copy()
+    test_rows = frame[frame.split == "test"].copy()
+    expected = (12, 12, 3, 3, 132, 132)
+    actual = tuple(map(len, (source_train, target_train, source_val, target_val, val_rows, test_rows)))
+    if actual != expected:
+        raise ValueError(f"Unexpected manifest split {actual}, expected {expected}")
+
+    spectra, frequency = {}, None
+    needed = pd.concat([source_train, target_train, source_val, target_val,
+                        val_rows, test_rows]).drop_duplicates("record_id")
+    for i, row in enumerate(needed.itertuples(), 1):
+        f, s = modal.record_spectra(row.path, args.fs, args.window, args.stride,
+                                    args.fmin, args.fmax)
+        if frequency is None: frequency = f
+        spectra[row.record_id] = s
+        if i % 24 == 0 or i == len(needed):
+            print(f"spectra={i}/{len(needed)}", flush=True)
+    anchors = modal.learn_anchors([spectra[x] for x in source_train.record_id], frequency,
+                                  args.modes, args.mode_separation)
+    features = {key: modal.track_modes(frequency, value, anchors, args.tracking_radius)
+                for key, value in spectra.items()}
+    source_raw = np.concatenate([features[x] for x in source_train.record_id])
+    center, spread = modal.robust_scaler(source_raw)
+    scaled = {key: modal.scale(value, center, spread) for key, value in features.items()}
+    source_x = np.concatenate([scaled[x] for x in source_train.record_id])
+    target_x = np.concatenate([scaled[x] for x in target_train.record_id])
+    source_val_x = np.concatenate([scaled[x] for x in source_val.record_id])
+
+    started = time.time()
+    model, history = train_source_ae(source_x, source_val_x, args, device)
+    history.to_csv(args.output / "training_history.csv", index=False)
+    rotation = fit_rotation(encode(model, source_x, device), encode(model, target_x, device))
+    source_val_errors = reconstruction_errors(model, source_val_x, device)
+    threshold = float(np.quantile(source_val_errors, args.threshold_quantile))
+
+    def score_rows(rows, split):
+        output = []
+        for row in rows.itertuples():
+            domain = modal.domain_for_state(row.state); x = scaled[row.record_id]
+            error = reconstruction_errors(model, x, device,
+                                           rotation if domain == "target" else None)
+            score = modal.record_quantile(error, args.record_quantile)
+            output.append({"record_id": row.record_id, "state": row.state,
+                           "scenario": row.scenario, "excitation": row.excitation,
+                           "setup": int(row.setup), "label": int(row.label),
+                           "split": split, "domain": domain, "score": score,
+                           "alarm": score > threshold})
+        return pd.DataFrame(output)
+
+    validation = score_rows(val_rows, "validation")
+    test = score_rows(test_rows, "locked_test")
+    validation.to_csv(args.output / "validation_record_scores.csv", index=False)
+    test.to_csv(args.output / "locked_test_record_scores.csv", index=False)
+    val_metrics = base.metrics(validation.label, validation.score, threshold)
+    test_metrics = base.metrics(test.label, test.score, threshold)
+    states = test.groupby(["state", "scenario", "label"], as_index=False).agg(
+        records=("record_id", "size"), score=("score", "median"), alarm_rate=("alarm", "mean"))
+    states["alarm"] = states.alarm_rate >= .5
+    states.to_csv(args.output / "locked_test_state_scores.csv", index=False)
+    summary = {"method": "MSSP2026_natural_frequency_AE_OrthogonalProcrustes",
+               "source_healthy_train": len(source_train), "target_healthy_alignment": len(target_train),
+               "damage_used_for_fit": False, "damage_used_for_threshold": False,
+               "epochs_run": int(history.epoch.max()), "seconds": time.time() - started,
+               "threshold": threshold,
+               **{f"validation_{k}": v for k, v in val_metrics.items()},
+               **{f"record_{k}": v for k, v in test_metrics.items()}}
+    pd.DataFrame([summary]).to_csv(args.output / "metrics.csv", index=False)
+    torch.save({"state_dict": model.state_dict(), "center": center, "spread": spread,
+                "anchors": anchors, "rotation": rotation, "threshold": threshold,
+                "args": vars(args)}, args.output / "model.pt")
+    metadata = {
+        "paper": "Nogueira et al., MSSP 261 (2026) 115013",
+        "doi": "10.1016/j.ymssp.2026.115013",
+        "paper_equations": ["Zt* = Zt R", "R = argmin ||Zt R - Zs||_F",
+                            "Xhat_t = Decoder_s(Zt*)", "MSE"],
+        "z24_adapter": "fixed modal anchors learned from S01 healthy train; pre/post lifting defines source/target",
+        "alignment": "12 S01 and 12 S08 healthy train records only; no damage",
+        "causal_deconfounding_not_run": "record-level temperature/environment metadata absent from manifest",
+        "parameters": vars(args),
+    }
     (args.output / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
+
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
-    axes[0].plot(history.epoch, history.train_loss, label="S01 train")
-    axes[0].plot(history.epoch, history.val_healthy_loss, label="S01 calibration")
-    axes[0].set(title="Autoencoder loss", xlabel="Epoch", ylabel="MSE"); axes[0].legend(); axes[0].grid(alpha=.2)
-    for scores, label in [(raw_scores, "No alignment"), (aligned_scores, "Procrustes")]:
-        fpr, tpr, _ = roc_curve(evaluation.label, scores); axes[1].plot(fpr, tpr, label=label)
-    axes[1].plot([0, 1], [0, 1], "--", color="gray"); axes[1].set(title="Record ROC", xlabel="FPR", ylabel="TPR"); axes[1].legend()
-    pred = (aligned_scores > threshold).astype(int)
-    ConfusionMatrixDisplay(confusion_matrix(evaluation.label, pred, labels=[0, 1]),
+    axes[0].plot(history.epoch, history.train_loss, label="source train")
+    axes[0].plot(history.epoch, history.source_val_loss, label="source healthy val")
+    axes[0].legend(); axes[0].set_title("Source AE loss")
+    fpr, tpr, _ = roc_curve(test.label, test.score)
+    axes[1].plot(fpr, tpr, label=f"AUROC={test_metrics['auroc']:.3f}")
+    axes[1].plot([0, 1], [0, 1], "--", color="gray"); axes[1].legend(); axes[1].set_title("Locked-test ROC")
+    ConfusionMatrixDisplay(confusion_matrix(test.label, test.alarm, labels=[0, 1]),
                            display_labels=["Healthy", "Damage"]).plot(ax=axes[2], cmap="Greens", colorbar=False)
-    axes[2].set_title("Procrustes record confusion")
-    fig.tight_layout(); fig.savefig(args.output / "procrustes_results.png", dpi=190, bbox_inches="tight")
-    plt.close(fig)
-    print("\nRESULTS\n" + results.to_string(index=False), flush=True)
-    print("\nPROCRUSTES STATE SCORES\n" + aligned_states.to_string(index=False), flush=True)
+    axes[2].set_title("Locked-test confusion"); fig.tight_layout()
+    fig.savefig(args.output / "procrustes_results.png", dpi=190); plt.close(fig)
+    print("\nRESULT\n" + pd.DataFrame([summary]).to_string(index=False), flush=True)
+    print("\nSTATE SCORES\n" + states.to_string(index=False), flush=True)
     print(f"outputs={args.output}", flush=True)
 
 
-if __name__ == "__main__": main()
-
+if __name__ == "__main__":
+    main()

@@ -2,6 +2,32 @@
 
 ## Elsevier IF>10 paper-preprocessing experiments
 
+### Healthy-domain overlap methods on the exported split
+
+Two MSSP 2026 methods address overlap caused by healthy-domain shift while
+keeping all damage out of fitting:
+
+- `run_z24_procrustes_ae.py`: natural-frequency source AE followed by the
+  paper's orthogonal latent alignment and source-decoder reuse (Nogueira et
+  al., DOI `10.1016/j.ymssp.2026.115013`).
+- `run_z24_target_source_ocsvm.py`: target-healthy to source-healthy mapping
+  followed by a source-only one-class SVM (Heravi et al., DOI
+  `10.1016/j.ymssp.2025.113673`). The paper does not release its observation
+  pairing routine, so the Z24 adapter uses nearest-source modal pairing learned
+  from healthy train only and records it in `run_metadata.json`.
+
+Run both on Kaggle:
+
+```python
+!python -u kaggle/z24_overlap_papers_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split/train
+```
+
+Both runners consume the manifest partitions verbatim. S01 is the pre-lifting
+source domain and S08 is the post-lifting target domain. Causal environmental
+deconfounding is intentionally not emulated because this manifest has no
+temperature/environment observation synchronized to each MAT record.
+
 This suite keeps the paper workflows separate instead of mixing them into a
 new proposed preprocessor:
 
@@ -21,12 +47,11 @@ new proposed preprocessor:
    & System Safety* 252 (2024) 110465. It retains the previously implemented
    moving-window, dynamic-graph, Transformer and Tail-p experiment.
 
-For all three suite runs, S01 setups 1--6 are healthy training, S01
-setups 7--9 are healthy calibration, states 04/05/06/10/14/16/17 form the
-damage validation set, and S08 plus states 03/07/09/11/12/13/15 are the locked
-mixed healthy/damage test. Damage validation is never used in gradient fitting
-or threshold estimation. It is nevertheless an opened development set, which
-is recorded in every output's metadata.
+All three suite runners now consume the exported manifest split verbatim:
+24 healthy train records, six healthy plus 126 damage validation records, and
+six healthy plus 126 damage locked-test records. Damage is never used in
+gradient fitting, preprocessing statistics, sensor selection, alignment, or
+threshold estimation.
 
 Kaggle command:
 
@@ -37,7 +62,11 @@ Kaggle command:
   --epochs 30 --patience 8 --batch-size 256
 ```
 
-Use `--skip-mdfa`, `--skip-timevertex`, or `--skip-edgeconv` to run one paper
+The MDFA and TimeVertex runners read the exported manifest partitions verbatim:
+24 healthy train records, six healthy validation records plus 126 validation
+damage records, and 132 locked-test records. Preprocessing statistics and
+sensor selection use healthy train only. Use `--skip-mdfa`,
+`--skip-timevertex`, or `--skip-edgeconv` to run one paper
 at a time. All scripts save train/healthy-validation curves, locked-test
 confusion matrices, record/state scores, metrics, checkpoints, and an explicit
 reproduction/adaptation audit.
@@ -410,4 +439,3 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 ```
 
 Ablation without augmentation: add `--no_augment`.
-

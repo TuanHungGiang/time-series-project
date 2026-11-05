@@ -230,10 +230,17 @@ def main() -> None:
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True); seed_all(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frame = common.resolve_manifest(args.manifest, args.data_root)
-    train_rows = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].sort_values(["setup", "excitation"])
-    cal_rows = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].sort_values(["setup", "excitation"])
-    validation_rows = frame[frame.state.isin(VAL_DAMAGE)].sort_values(["state", "setup", "excitation"])
-    test_rows = frame[frame.state.isin({"08"} | TEST_DAMAGE)].sort_values(["state", "setup", "excitation"])
+    # Respect the exported record-level split verbatim.  All preprocessing
+    # statistics (bandwidth and robust scaling) are fit on healthy train only.
+    train_rows = frame[(frame.split == "train") & (frame.label == 0)].sort_values(
+        ["state", "setup", "excitation"])
+    cal_rows = frame[(frame.split == "val") & (frame.label == 0)].sort_values(
+        ["state", "setup", "excitation"])
+    validation_rows = frame[(frame.split == "val") & (frame.label == 1)].sort_values(
+        ["state", "setup", "excitation"])
+    test_rows = frame[frame.split == "test"].sort_values(["state", "setup", "excitation"])
+    if (len(train_rows), len(cal_rows), len(validation_rows), len(test_rows)) != (24, 6, 126, 132):
+        raise ValueError("Unexpected manifest split; expected train/cal/val-damage/test = 24/6/126/132")
     raw_train = [common.vertical_values(path) for path in train_rows.path]
     cutoff = bandwidth_90(raw_train, args.fs, args.min_cutoff, args.max_cutoff)
     print(f"device={device} train_healthy={len(train_rows)} cal_healthy={len(cal_rows)} "
@@ -294,8 +301,10 @@ def main() -> None:
                                "raw/time/frequency/db4-wavelet branches", "branch encoders and latent fusion",
                                "healthy-only reconstruction training"],
                 "z24_adaptation": "sensor-window samples because PDT sensor count varies by setup; no fake padding",
-                "split": {"train": "S01 setups 1-6 healthy", "calibration": "S01 setups 7-9 healthy",
-                          "validation": sorted(VAL_DAMAGE), "locked_test": ["08", *sorted(TEST_DAMAGE)]},
+                "split": {"train": "manifest train: 24 healthy S01/S08 records",
+                          "calibration": "manifest val: 6 healthy S01/S08 records",
+                          "validation": "manifest val: 126 damage records",
+                          "locked_test": "manifest test: 6 healthy + 126 damage records"},
                 "parameters": vars(args)}
     (args.output / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
@@ -315,4 +324,3 @@ def main() -> None:
 
 
 if __name__ == "__main__": main()
-

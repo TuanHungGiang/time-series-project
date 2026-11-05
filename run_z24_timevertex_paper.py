@@ -201,23 +201,46 @@ def main() -> None:
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True); seed_all(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frame = common.resolve_manifest(args.manifest, args.data_root)
-    train_rows = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].sort_values(["setup", "excitation"])
-    cal_rows = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].sort_values(["setup", "excitation"])
-    validation_rows = frame[frame.state.isin(VAL_DAMAGE)].sort_values(["state", "setup", "excitation"])
-    test_rows = frame[frame.state.isin({"08"} | TEST_DAMAGE)].sort_values(["state", "setup", "excitation"])
-    # Learn a distinct sensor subset from the S01 healthy record of every setup/excitation.
+    train_rows = frame[(frame.split == "train") & (frame.label == 0)].sort_values(
+        ["state", "setup", "excitation"])
+    cal_rows = frame[(frame.split == "val") & (frame.label == 0)].sort_values(
+        ["state", "setup", "excitation"])
+    validation_rows = frame[(frame.split == "val") & (frame.label == 1)].sort_values(
+        ["state", "setup", "excitation"])
+    test_rows = frame[frame.split == "test"].sort_values(["state", "setup", "excitation"])
+    if (len(train_rows), len(cal_rows), len(validation_rows), len(test_rows)) != (24, 6, 126, 132):
+        raise ValueError("Unexpected manifest split; expected train/cal/val-damage/test = 24/6/126/132")
+
+    # Learn a distinct sensor subset for every AVT/FVT x setup using healthy
+    # training records only.  When both S01 and S08 are present for one
+    # configuration, descriptors are learned from their common named sensors
+    # after concatenating the two healthy recordings in time.
     selections, audit, healthy_values = {}, {}, {}
-    for row in frame[frame.state == "01"].itertuples():
-        names, values = named_vertical(row.path); key = (row.excitation, int(row.setup))
-        selected, details = select_timevertex_sensors(values, args.fs, args.fmax,
-                                                       args.selected_sensors, args.seed + int(row.setup))
+    for key, rows in train_rows.groupby(["excitation", "setup"], sort=True):
+        loaded = [named_vertical(row.path) for row in rows.itertuples()]
+        common_names = [name for name in loaded[0][0]
+                        if all(name in names for names, _ in loaded[1:])]
+        if len(common_names) < args.selected_sensors:
+            raise ValueError(f"Only {len(common_names)} common healthy-train sensors for {key}")
+        aligned = []
+        for names, values in loaded:
+            lookup = {name: i for i, name in enumerate(names)}
+            aligned.append(values[:, [lookup[name] for name in common_names]])
+        values = np.concatenate(aligned, axis=0)
+        names = common_names
+        selected, details = select_timevertex_sensors(
+            values, args.fs, args.fmax, args.selected_sensors, args.seed + int(key[1]))
         selected_names = [names[i] for i in selected]
         fallback_names = [names[i] for i in details["fallback_order"]]
-        selections[key] = {"selected_names": selected_names, "fallback_names": fallback_names}
-        healthy_values[row.record_id] = values
-        audit[f"{row.excitation}_setup{int(row.setup):02d}"] = {
+        normalized_key = (str(key[0]), int(key[1]))
+        selections[normalized_key] = {"selected_names": selected_names, "fallback_names": fallback_names}
+        audit[f"{key[0]}_setup{int(key[1]):02d}"] = {
+            "healthy_train_records": rows.record_id.tolist(),
             "sensor_names": names, "selected_indices": selected.tolist(),
             "selected_names": selected_names, "fallback_names": fallback_names, **details}
+    expected_keys = {(excitation, setup) for excitation in ("avt", "fvt") for setup in range(1, 10)}
+    if set(selections) != expected_keys:
+        raise ValueError(f"Healthy train does not cover all configurations; missing={sorted(expected_keys-set(selections))}")
     print(f"device={device} learned_timevertex_graphs={len(selections)} train_healthy={len(train_rows)} "
           f"cal_healthy={len(cal_rows)} validation_damage={len(validation_rows)} locked_test={len(test_rows)}", flush=True)
     cache = {}
@@ -293,8 +316,10 @@ def main() -> None:
                                "graph-central representative selection", "healthy-only AE",
                                "healthy validation mean + 2 sigma threshold"],
                 "z24_adaptation": "one graph per excitation/setup because Z24 sensors are roving",
-                "split": {"train": "S01 setups 1-6 healthy", "calibration": "S01 setups 7-9 healthy",
-                          "validation": sorted(VAL_DAMAGE), "locked_test": ["08", *sorted(TEST_DAMAGE)]},
+                "split": {"train": "manifest train: 24 healthy S01/S08 records",
+                          "calibration": "manifest val: 6 healthy S01/S08 records",
+                          "validation": "manifest val: 126 damage records",
+                          "locked_test": "manifest test: 6 healthy + 126 damage records"},
                 "parameters": vars(args)}
     (args.output / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
@@ -314,4 +339,3 @@ def main() -> None:
 
 
 if __name__ == "__main__": main()
-
