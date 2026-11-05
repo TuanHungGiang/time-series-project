@@ -28,6 +28,9 @@ from torch import nn
 
 import run_z24_strict_psd_scatterad as base
 
+VAL_DAMAGE = {"04", "05", "06", "10", "14", "16", "17"}
+TEST_DAMAGE = {"03", "07", "09", "11", "12", "13", "15"}
+
 
 def sensor_window_features(path: Path, fs: float, raw_window: int, stride: int,
                            bins: int, fmin: float, fmax: float) -> np.ndarray:
@@ -138,16 +141,23 @@ def main():
     p.add_argument("--fmin", type=float, default=3.); p.add_argument("--fmax", type=float, default=20.)
     p.add_argument("--tail-quantile", type=float, default=.95)
     p.add_argument("--record-fraction", type=float, default=.20); p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--paper-split", action="store_true",
+                   help="Use mixed damage validation and locked S08+damage test instead of evaluating all states")
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frame = base.resolve_manifest(args.manifest, args.data_root)
     train_rows = frame[(frame.state == "01") & (frame.setup.astype(int) <= 6)].copy()
     cal_rows = frame[(frame.state == "01") & (frame.setup.astype(int) >= 7)].copy()
-    evaluation = frame[~frame.state.isin(["01", "02"])].copy()
+    validation_rows = frame[frame.state.isin(VAL_DAMAGE)].copy() if args.paper_split else frame.iloc[0:0].copy()
+    evaluation = (frame[frame.state.isin({"08"} | TEST_DAMAGE)].copy() if args.paper_split
+                  else frame[~frame.state.isin(["01", "02"])].copy())
     feature_args = (args.fs, args.raw_window, args.stride, args.psd_bins, args.fmin, args.fmax)
     cache = {}
-    for group, rows in (("train", train_rows), ("cal", cal_rows), ("evaluation", evaluation)):
+    feature_groups = [("train", train_rows), ("cal", cal_rows)]
+    if args.paper_split: feature_groups.append(("damage_validation", validation_rows))
+    feature_groups.append(("evaluation", evaluation))
+    for group, rows in feature_groups:
         for row in rows.itertuples(): cache[row.record_id] = sensor_window_features(row.path, *feature_args)
         print(f"features {group}={len(rows)}", flush=True)
     train_raw = [cache[x] for x in train_rows.record_id]; center, scale = fit_scaler(train_raw)
@@ -164,15 +174,32 @@ def main():
     cal_fractions = [record_tail_score(record_error(model, x, device), train_errors,
                                        time_threshold)[0] for x in cal]
     print(f"S01 calibration time_threshold={time_threshold:.6f} fractions={cal_fractions}", flush=True)
-    rows = []
-    for i, row in enumerate(evaluation.itertuples(), 1):
-        x = scale_record(cache[row.record_id], center, scale)
-        fraction, median_tail, _ = record_tail_score(record_error(model, x, device), train_errors, time_threshold)
-        rows.append({"record_id": row.record_id, "state": row.state, "scenario": row.scenario,
-                     "excitation": row.excitation, "setup": int(row.setup), "label": int(row.label),
-                     "tail_fraction": fraction, "median_tail_score": median_tail,
-                     "alarm": fraction > args.record_fraction})
-    records = pd.DataFrame(rows); records.to_csv(args.output / "record_scores.csv", index=False)
+    def score_rows(source, split):
+        rows = []
+        for row in source.itertuples():
+            x = scale_record(cache[row.record_id], center, scale)
+            fraction, median_tail, _ = record_tail_score(
+                record_error(model, x, device), train_errors, time_threshold)
+            rows.append({"record_id": row.record_id, "state": row.state, "scenario": row.scenario,
+                         "excitation": row.excitation, "setup": int(row.setup), "label": int(row.label),
+                         "split": split, "tail_fraction": fraction, "median_tail_score": median_tail,
+                         "alarm": fraction > args.record_fraction})
+        return pd.DataFrame(rows)
+    records = score_rows(evaluation, "locked_test" if args.paper_split else "all_evaluation")
+    records.to_csv(args.output / "record_scores.csv", index=False)
+    validation_metrics = {}
+    if args.paper_split:
+        damage_validation = score_rows(validation_rows, "damage_validation")
+        healthy_validation = []
+        for row, fraction in zip(cal_rows.itertuples(), cal_fractions):
+            healthy_validation.append({"record_id": row.record_id, "state": "01", "scenario": row.scenario,
+                                       "excitation": row.excitation, "setup": int(row.setup), "label": 0,
+                                       "split": "healthy_validation", "tail_fraction": fraction,
+                                       "median_tail_score": np.nan,
+                                       "alarm": fraction > args.record_fraction})
+        validation = pd.concat([pd.DataFrame(healthy_validation), damage_validation], ignore_index=True)
+        validation.to_csv(args.output / "validation_record_scores.csv", index=False)
+        validation_metrics = base.metrics(validation.label, validation.tail_fraction, args.record_fraction)
     result = base.metrics(records.label, records.tail_fraction, args.record_fraction)
     states = records.groupby(["state", "scenario", "label"], as_index=False).agg(
         records=("record_id", "size"), score=("tail_fraction", "median"), alarm_rate=("alarm", "mean"))
@@ -181,8 +208,11 @@ def main():
     tn, fp, fn, tp = confusion_matrix(sy, sp, labels=[0, 1]).ravel()
     summary = {"method": "DynamicGraphCNN_Transformer_TailP_RESS2024_equation_adaptation",
                "damage_used_for_fit": False, "s08_used_for_fit": False,
+               "paper_damage_validation_split": bool(args.paper_split),
+               "damage_validation_opened_before_locked_test": bool(args.paper_split),
                "epochs_run": int(history.epoch.max()), "seconds": time.time() - started,
                "s01_calibration_alarm_records": int(sum(x > args.record_fraction for x in cal_fractions)),
+               **{f"validation_{k}": v for k, v in validation_metrics.items()},
                **{f"record_{k}": v for k, v in result.items()},
                "state_tn": int(tn), "state_fp": int(fp), "state_fn": int(fn), "state_tp": int(tp),
                "state_accuracy": float((sy == sp).mean())}
@@ -192,7 +222,10 @@ def main():
                 "args": vars(args)}, args.output / "model.pt")
     meta = {"paper": "Liu et al., Structural damage detection and localization via an unsupervised anomaly detection method, RESS 252 (2024) 110465",
             "doi": "10.1016/j.ress.2024.110465", "implementation_scope": "equation-based healthy reconstruction adaptation; no public author code found",
-            "strict_protocol": "S01 setups 1-6 train, S01 setups 7-9 calibrate, S08/damage evaluation-only",
+            "strict_protocol": ("S01 setups 1-6 train, S01 setups 7-9 calibrate, damage validation states "
+                                f"{sorted(VAL_DAMAGE)}, locked S08+damage test {sorted(TEST_DAMAGE)}"
+                                if args.paper_split else
+                                "S01 setups 1-6 train, S01 setups 7-9 calibrate, S08/damage evaluation-only"),
             "parameters": vars(args)}
     (args.output / "run_metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8)); axes[0].plot(history.epoch, history.train_loss, label="train")
