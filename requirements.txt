@@ -7,3 +7,5 @@ huggingface_hub
 notebook
 ipykernel
 tsaug
+pandas
+PyWavelets
