@@ -323,11 +323,13 @@ embedding for Target-to-Source+OCSVM and AE+Procrustes:
 !python -u /kaggle/working/time-series-project/kaggle/z24_healthy_cpc_kaggle.py \
   --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
   --backbones target_source,procrustes --cpc-epochs 50 \
-  --downstream-epochs 100 --patience 20 --batch-size 32
+  --compact-epochs 30 --downstream-epochs 100 --patience 20 --batch-size 32
 ```
 
-Outputs are saved to `/kaggle/working/z24_healthy_cpc`. `cpc_deltas.csv` is the
-primary preprocessing ablation. No time warp, resampling, or frequency shifting
+Outputs are saved to `/kaggle/working/z24_healthy_cpc`. `cpc_deltas.csv` compares
+both plain CPC and compact-CPC against direct log-PSD. Compact-CPC adds a fixed
+healthy hypersphere centre and cross-view consistency while retaining CPC to
+avoid representation collapse. No time warp, resampling, or frequency shifting
 is used. This is a disclosed equation/workflow adaptation because author code
 was not available; it must not be described as an official reproduction.
 
