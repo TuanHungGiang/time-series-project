@@ -310,6 +310,26 @@ augmented. Add `--no_augment` for a no-augmentation ablation on this pipeline.
 
 ## Run on Kaggle
 
+### Regime-conditioned cointegration preprocessing ablation
+
+This ablation applies the same S01/train-only Johansen residualisation to the
+two strongest modal-transfer baselines, with AVT/FVT treated as observed
+operational regimes. It compares the untouched modal input against the
+cointegration residual input on the identical manifest split:
+
+```python
+!git -C /kaggle/working/time-series-project pull origin main
+!python -u /kaggle/working/time-series-project/kaggle/z24_regime_cointegration_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --models target_source,procrustes --epochs 300 --patience 50 --rank 3
+```
+
+For a first cointegration-only smoke run, add `--only-cointegration --epochs
+50 --patience 20`. The implementation follows the Johansen/VECM stationary
+subspace equations but uses the manifest's known AVT/FVT regime rather than
+the paper's latent regime-switching process. It is therefore a disclosed Z24
+equation adaptation of Shi, Worden and Cross (MSSP 2018), not author code.
+
 ### Modern Z24 baseline suite
 
 Run the original baseline pipelines before changing their preprocessing:
