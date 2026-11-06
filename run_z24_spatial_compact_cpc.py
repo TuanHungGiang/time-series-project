@@ -97,8 +97,12 @@ def spatial_segments(parts: list[np.ndarray], length: int, stride: int,
 class SpatialCPC(nn.Module):
     """Permutation-invariant sensor encoder retaining local max deviations."""
     def __init__(self, features: int, latent: int, context: int,
-                 prediction_steps: int):
+                 prediction_steps: int, pooling: str = "max",
+                 topk_fraction: float = .25):
         super().__init__(); self.prediction_steps = prediction_steps
+        if pooling not in {"max", "topk_trimmed"}:
+            raise ValueError(f"Unknown sensor pooling: {pooling}")
+        self.pooling = pooling; self.topk_fraction = topk_fraction
         self.sensor_encoder = nn.Sequential(
             nn.Linear(features, 128), nn.ELU(), nn.Linear(128, latent),
             nn.LayerNorm(latent),
@@ -116,11 +120,22 @@ class SpatialCPC(nn.Module):
         valid = mask.unsqueeze(-1)
         count = valid.sum(dim=2).clamp_min(1)
         mean = (z * valid).sum(dim=2) / count
-        maximum = z.masked_fill(~valid, torch.finfo(z.dtype).min).max(dim=2).values
+        local_values = z.masked_fill(~valid, torch.finfo(z.dtype).min)
+        if self.pooling == "max":
+            local = local_values.max(dim=2).values
+        else:
+            # Average the strongest local responses but discard the single
+            # largest sensor activation. This retains local damage sensitivity
+            # while preventing one noisy/unseen roving sensor from controlling
+            # the entire record. Z24 has >=15 vertical channels, so k>=3.
+            k = max(3, int(np.ceil(z.shape[2] * self.topk_fraction)))
+            k = min(k, int(mask.sum(dim=2).min().item()))
+            strongest = local_values.topk(k, dim=2).values
+            local = strongest[:, :, 1:].mean(dim=2)
         logits = self.attention(z).squeeze(-1).masked_fill(~mask, -1e4)
         weights = torch.softmax(logits, dim=2).unsqueeze(-1)
         attended = (weights * z).sum(dim=2)
-        return self.pool_projection(torch.cat([mean, maximum, attended], dim=-1))
+        return self.pool_projection(torch.cat([mean, local, attended], dim=-1))
 
     def embed(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         pooled = self.sensor_pool(x, mask)
@@ -570,6 +585,7 @@ def main():
     p.add_argument("--consistency-weight", type=float, default=.5); p.add_argument("--compact-cpc-weight", type=float, default=.2)
     p.add_argument("--variance-weight", type=float, default=.25); p.add_argument("--covariance-weight", type=float, default=.05)
     p.add_argument("--variance-target", type=float, default=1.)
+    p.add_argument("--topk-fraction", type=float, default=.25)
     p.add_argument("--paired-epochs", type=int, default=30); p.add_argument("--paired-patience", type=int, default=8)
     p.add_argument("--paired-lr", type=float, default=2e-4)
     p.add_argument("--paired-domain-weight", type=float, default=1.)
@@ -660,6 +676,34 @@ def main():
     target_validation, target_validation_mask = spatial_segments(
         [scaled[x] for x in target_val.record_id], args.context_length,
         args.segment_stride, max_sensors)
+
+    # Pooling ablation: the full representation training schedule is repeated
+    # from scratch with trimmed top-k local aggregation.  No test/damage signal
+    # selects k; the fraction is fixed before evaluation.
+    topk_model = SpatialCPC(args.psd_bins, args.cpc_latent, args.cpc_context,
+                            args.prediction_steps, pooling="topk_trimmed",
+                            topk_fraction=args.topk_fraction).to(device)
+    topk_model, topk_h1 = train_spatial(
+        topk_model, train, train_mask, validation, validation_mask, args, device,
+        args.cpc_epochs, args.cpc_patience, args.cpc_lr)
+    topk_center = spatial_center(topk_model, train, train_mask,
+                                 args.batch_size, device)
+    topk_model, topk_h2 = train_spatial(
+        topk_model, train, train_mask, validation, validation_mask, args, device,
+        args.compact_epochs, args.compact_patience, args.compact_lr,
+        topk_center, True)
+    topk_vicreg_cache = embed_spatial(topk_model, scaled, max_sensors, device)
+    paired_topk_model = copy.deepcopy(topk_model)
+    paired_topk_model, topk_h3 = train_paired_vicreg(
+        paired_topk_model, (paired_sx, paired_sm, paired_tx, paired_tm),
+        (validation, validation_mask),
+        (target_validation, target_validation_mask), args, device)
+    paired_topk_cache = embed_spatial(paired_topk_model, scaled,
+                                      max_sensors, device)
+    pd.concat([topk_h1, topk_h2], ignore_index=True).to_csv(
+        args.output / "topk_spatial_training_history.csv", index=False)
+    topk_h3.to_csv(args.output / "paired_topk_vicreg_history.csv", index=False)
+
     paired_model = copy.deepcopy(anti_model)
     paired_model, h4 = train_paired_vicreg(
         paired_model, (paired_sx, paired_sm, paired_tx, paired_tm),
@@ -687,6 +731,8 @@ def main():
                 "spatial_vicreg_compact": spatial_anti,
                 "spatial_vicreg_modal_fusion": fused,
                 "paired_healthy_vicreg": paired_cache,
+                "topk_vicreg_compact": topk_vicreg_cache,
+                "paired_topk_vicreg": paired_topk_cache,
                 "paired_vicreg_nuisance_r1": nuisance_r1,
                 "paired_vicreg_nuisance_r2": nuisance_r2}
     parts = (source_train, target_train, source_val, target_val, test_rows)
@@ -736,6 +782,8 @@ def main():
                 "spatial_compact": compact_model.state_dict(),
                 "spatial_vicreg_compact": anti_model.state_dict(),
                 "paired_healthy_vicreg": paired_model.state_dict(),
+                "topk_vicreg_compact": topk_model.state_dict(),
+                "paired_topk_vicreg": paired_topk_model.state_dict(),
                 "healthy_center": healthy.cpu(), "psd_center": center,
                 "psd_scale": scale, "modal_anchors": anchors,
                 "median_psd_center": median_center,
@@ -749,6 +797,8 @@ def main():
         "s08_use": "downstream Procrustes healthy alignment only, not preprocessing",
         "domain_calibration": "S01-val calibrates source; S08-val calibrates target; damage excluded",
         "paired_invariance": "S01/S08 healthy train pairs sharing excitation+setup; damage excluded",
+        "topk_pooling": {"rule": "discard strongest sensor then average remaining top-k activations",
+                         "fraction": args.topk_fraction},
         "nuisance_projection": {"rank1": nuisance_audit_r1,
                                 "rank2": nuisance_audit_r2},
         "variants": list(variants), "elapsed_seconds": time.time() - started,
