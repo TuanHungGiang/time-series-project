@@ -567,11 +567,18 @@ Ranks are reported as separate locked-test ablations and are never selected
 using damage. Pair membership and removed energy are saved to
 `paired_healthy_manifest.csv` and `nuisance_projection_audit.json`.
 
+Two additional pooling ablations target false healthy alarms caused by one
+roving-sensor outlier. `topk_vicreg_compact` replaces the local maximum with a
+fixed top-25% sensor average after dropping the single strongest activation;
+`paired_topk_vicreg` adds the identical paired healthy refinement. The 25%
+fraction is fixed before test evaluation and is not selected using damage.
+
 ```bash
 python kaggle/z24_spatial_compact_cpc_kaggle.py \
   --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
   --cpc-epochs 50 --compact-epochs 30 \
   --paired-epochs 30 \
+  --topk-fraction 0.25 \
   --downstream-epochs 100 --patience 20 --batch-size 32
 ```
 
