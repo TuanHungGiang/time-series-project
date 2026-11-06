@@ -548,6 +548,13 @@ variance-covariance anti-collapse regularisation, modal fusion, and a
 healthy-only EVT threshold.  Representation fitting, modal anchors, scaling,
 early stopping, and thresholds do not use damage.
 
+The output also includes `domain_healthy_q99`: S01 healthy validation
+calibrates the pre-lifting/source score scale and S08 healthy validation
+calibrates the post-lifting/target score scale.  Errors are divided by their
+matching healthy-domain q99, yielding one decision boundary at 1.0.  This
+directly tests whether false S08 alarms were caused by residual domain scale;
+damage is never used for either threshold.
+
 ```bash
 python kaggle/z24_spatial_compact_cpc_kaggle.py \
   --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
