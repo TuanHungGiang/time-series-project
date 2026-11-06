@@ -319,11 +319,12 @@ def procrustes_decisions(variant, cache, parts, args, device):
     # Paired ablation: identical downstream initialisation/shuffle per feature
     # variant, so representation changes are not confounded by AE RNG order.
     control.seed_all(args.seed)
-    source_train, target_train, source_val, _, test_rows = parts
+    source_train, target_train, source_val, target_val, test_rows = parts
     scaled, _, _ = control.prepare_variant(cache, source_train)
     sx = np.concatenate([scaled[x] for x in source_train.record_id])
     tx = np.concatenate([scaled[x] for x in target_train.record_id])
     sv = np.concatenate([scaled[x] for x in source_val.record_id])
+    tv = np.concatenate([scaled[x] for x in target_val.record_id])
     ae_args = SimpleNamespace(latent=args.ae_latent, dropout=args.dropout,
                               lr=args.ae_lr, weight_decay=args.weight_decay,
                               epochs=args.downstream_epochs,
@@ -332,8 +333,19 @@ def procrustes_decisions(variant, cache, parts, args, device):
     model, history = train_source_ae(sx, sv, ae_args, device)
     rotation = fit_rotation(encode(model, sx, device), encode(model, tx, device))
     calibration = reconstruction_errors(model, sv, device)
+    target_calibration = reconstruction_errors(model, tv, device, rotation)
     empirical = float(np.quantile(calibration, args.threshold_quantile))
     evt, evt_fit = evt_threshold(calibration, args.evt_tail_quantile, args.evt_alpha)
+
+    # Procrustes creates separate source/target score distributions.  A single
+    # source threshold confounds residual domain scale with damage.  Calibrate
+    # each scale using only its matching healthy validation partition, then
+    # express every error as a ratio to the healthy q99.  Damage remains fully
+    # locked and the common decision boundary becomes one.
+    domain_thresholds = {
+        "source": empirical,
+        "target": float(np.quantile(target_calibration, args.threshold_quantile)),
+    }
 
     def scorer(x, domain):
         return reconstruction_errors(model, x, device,
@@ -350,6 +362,26 @@ def procrustes_decisions(variant, cache, parts, args, device):
                           **metrics})
         test.insert(0, "preprocessing", variant); test.insert(1, "decision", decision)
         scores.append(test)
+
+    def normalized_scorer(x, domain):
+        return scorer(x, domain) / max(domain_thresholds[domain],
+                                       np.finfo(float).tiny)
+
+    calibrated = score_rows(test_rows, scaled, normalized_scorer, 1., "locked_test")
+    calibrated_metrics = common.metrics(calibrated.label, calibrated.score, 1.)
+    summaries.append({"backbone": "MSSP2026_AE_OrthogonalProcrustes",
+                      "preprocessing": variant,
+                      "decision": "domain_healthy_q99",
+                      "threshold_fit": "S01-val source + S08-val target",
+                      "epochs_run": int(history.epoch.max()),
+                      "source_threshold": domain_thresholds["source"],
+                      "target_threshold": domain_thresholds["target"],
+                      **calibrated_metrics})
+    calibrated.insert(0, "preprocessing", variant)
+    calibrated.insert(1, "decision", "domain_healthy_q99")
+    calibrated["raw_domain_threshold"] = calibrated.state.map(
+        lambda state: domain_thresholds[modal.domain_for_state(state)])
+    scores.append(calibrated)
     return summaries, scores
 
 
@@ -470,9 +502,10 @@ def main():
     for name, cache in variants.items():
         rows, detail = procrustes_decisions(name, cache, parts, args, device)
         summaries.extend(rows); scores.extend(detail)
-        selected = next(x for x in rows if x["decision"] == "empirical_q99")
-        print(f"done {name}: AUROC={selected['auroc']:.4f} "
-              f"BA={selected['balanced_accuracy']:.4f}", flush=True)
+        selected = next(x for x in rows if x["decision"] == "domain_healthy_q99")
+        print(f"done {name}/domain-calibrated: AUROC={selected['auroc']:.4f} "
+              f"BA={selected['balanced_accuracy']:.4f} "
+              f"specificity={selected['specificity']:.4f}", flush=True)
     summary = pd.DataFrame(summaries)
     detail = pd.concat(scores, ignore_index=True)
     summary.to_csv(args.output / "metrics.csv", index=False)
@@ -489,6 +522,18 @@ def main():
                        "delta_specificity": row.specificity - baseline.specificity})
     delta_frame = pd.DataFrame(deltas)
     delta_frame.to_csv(args.output / "ablation_deltas_vs_current.csv", index=False)
+    domain_rows = summary[summary.decision == "domain_healthy_q99"].copy()
+    domain_control = domain_rows[domain_rows.preprocessing ==
+                                 "median_compact_control"].iloc[0]
+    domain_deltas = []
+    for row in domain_rows.itertuples():
+        domain_deltas.append({"preprocessing": row.preprocessing,
+                              "delta_auroc": row.auroc - domain_control.auroc,
+                              "delta_balanced_accuracy": row.balanced_accuracy - domain_control.balanced_accuracy,
+                              "delta_f1": row.f1 - domain_control.f1,
+                              "delta_specificity": row.specificity - domain_control.specificity})
+    pd.DataFrame(domain_deltas).to_csv(
+        args.output / "domain_calibrated_deltas_vs_current.csv", index=False)
     states = detail.groupby(["preprocessing", "decision", "state", "scenario", "label"],
                             as_index=False).agg(records=("record_id", "size"),
                                                 score_median=("score", "median"),
@@ -507,6 +552,7 @@ def main():
     metadata = {
         "protocol": "representation/scalers/anchors S01 train; early stop and thresholds S01 val; damage evaluation only",
         "s08_use": "downstream Procrustes healthy alignment only, not preprocessing",
+        "domain_calibration": "S01-val calibrates source; S08-val calibrates target; damage excluded",
         "variants": list(variants), "elapsed_seconds": time.time() - started,
         "warning": "proposed equation adaptation; not author code",
         "parameters": vars(args),
