@@ -555,10 +555,23 @@ matching healthy-domain q99, yielding one decision boundary at 1.0.  This
 directly tests whether false S08 alarms were caused by residual domain scale;
 damage is never used for either threshold.
 
+The same runner now includes three representation-level follow-ups:
+
+- `paired_healthy_vicreg`: S01/S08 healthy train records are positive pairs
+  only when excitation and setup match (six auditable pairs at setups 4--6).
+- `paired_vicreg_nuisance_r1` and `_r2`: SVD is fitted to those paired healthy
+  S08-minus-S01 differences and the leading one/two lifting directions are
+  projected out before the downstream detector.
+
+Ranks are reported as separate locked-test ablations and are never selected
+using damage. Pair membership and removed energy are saved to
+`paired_healthy_manifest.csv` and `nuisance_projection_audit.json`.
+
 ```bash
 python kaggle/z24_spatial_compact_cpc_kaggle.py \
   --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
   --cpc-epochs 50 --compact-epochs 30 \
+  --paired-epochs 30 \
   --downstream-epochs 100 --patience 20 --batch-size 32
 ```
 
