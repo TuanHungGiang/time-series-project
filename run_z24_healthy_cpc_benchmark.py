@@ -160,6 +160,68 @@ def train_cpc(train, validation, args, device):
 
 
 @torch.no_grad()
+def healthy_center(model, sequences, batch_size, device):
+    model.eval(); total, count = None, 0
+    for (batch,) in DataLoader(TensorDataset(torch.from_numpy(sequences)), batch_size=batch_size):
+        context = model.embed(batch.to(device)).reshape(-1, model.context.hidden_size)
+        value = context.sum(dim=0); total = value if total is None else total + value; count += len(context)
+    center = total / max(count, 1)
+    # Deep-SVDD convention: avoid dimensions exactly at zero.
+    eps = 1e-3; center[(center.abs() < eps) & (center < 0)] = -eps
+    center[(center.abs() < eps) & (center >= 0)] = eps
+    return center.detach()
+
+
+@torch.no_grad()
+def compact_val_loss(model, sequences, center, args, device):
+    model.eval(); values = []
+    for (batch,) in DataLoader(TensorDataset(torch.from_numpy(sequences)), batch_size=args.batch_size):
+        batch = batch.to(device); context = model.embed(batch)
+        compact = torch.mean((context - center.view(1, 1, -1)) ** 2)
+        value = args.compact_cpc_weight * model.loss(batch, args.temperature) + args.compact_weight * compact
+        values.append(float(value.cpu()))
+    return float(np.mean(values))
+
+
+def train_compact_cpc(model, train, validation, center, args, device):
+    """OATC-inspired one-class refinement: CPC + compactness + view consistency."""
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.compact_lr, weight_decay=args.weight_decay)
+    loader = DataLoader(TensorDataset(torch.from_numpy(train)), batch_size=args.batch_size,
+                        shuffle=True, num_workers=0)
+    best, state, stale, history = float("inf"), None, 0, []
+    for epoch in range(1, args.compact_epochs + 1):
+        model.train(); totals, compact_values, consistency_values = [], [], []
+        for (batch,) in loader:
+            batch = batch.to(device); optimizer.zero_grad(set_to_none=True)
+            view_a = physics_safe_view(batch, args.aug_noise, args.mask_probability)
+            view_b = physics_safe_view(batch, args.aug_noise, args.mask_probability)
+            context_a, context_b = model.embed(view_a), model.embed(view_b)
+            compact = .5 * (torch.mean((context_a - center.view(1, 1, -1)) ** 2) +
+                            torch.mean((context_b - center.view(1, 1, -1)) ** 2))
+            consistency = 1. - F.cosine_similarity(context_a, context_b, dim=-1).mean()
+            predictive = .5 * (model.loss(view_a, args.temperature) +
+                                model.loss(view_b, args.temperature))
+            loss = (args.compact_cpc_weight * predictive + args.compact_weight * compact +
+                    args.consistency_weight * consistency)
+            loss.backward(); optimizer.step()
+            totals.append(float(loss.detach().cpu())); compact_values.append(float(compact.detach().cpu()))
+            consistency_values.append(float(consistency.detach().cpu()))
+        val = compact_val_loss(model, validation, center, args, device)
+        train_value = float(np.mean(totals))
+        history.append({"epoch": epoch, "total_train_loss": train_value,
+                        "compact_train_loss": float(np.mean(compact_values)),
+                        "consistency_train_loss": float(np.mean(consistency_values)),
+                        "healthy_val_objective": val})
+        if val < best - 1e-5: best, state, stale = val, copy.deepcopy(model.state_dict()), 0
+        else: stale += 1
+        if epoch == 1 or epoch % 10 == 0:
+            print(f"compact epoch={epoch}/{args.compact_epochs} train={train_value:.6f} val={val:.6f}", flush=True)
+        if stale >= args.compact_patience: break
+    if state is None: raise RuntimeError("Compact CPC produced no checkpoint")
+    model.load_state_dict(state); return model, pd.DataFrame(history)
+
+
+@torch.no_grad()
 def embed_records(model, cache, device):
     model.eval(); output = {}
     for key, value in cache.items():
@@ -241,6 +303,11 @@ def main():
     p.add_argument("--aug-noise", type=float, default=.02); p.add_argument("--mask-probability", type=float, default=.03)
     p.add_argument("--cpc-epochs", type=int, default=50); p.add_argument("--cpc-patience", type=int, default=10)
     p.add_argument("--cpc-lr", type=float, default=1e-3)
+    p.add_argument("--compact-epochs", type=int, default=30); p.add_argument("--compact-patience", type=int, default=8)
+    p.add_argument("--compact-lr", type=float, default=3e-4)
+    p.add_argument("--compact-weight", type=float, default=1.0)
+    p.add_argument("--consistency-weight", type=float, default=.5)
+    p.add_argument("--compact-cpc-weight", type=float, default=.2)
     p.add_argument("--downstream-epochs", type=int, default=100); p.add_argument("--downstream-patience", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=32); p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--mapper-hidden", type=int, default=32); p.add_argument("--mapper-latent", type=int, default=8)
@@ -270,7 +337,13 @@ def main():
     started = time.time(); cpc, cpc_history = train_cpc(train_segments, val_segments, args, device)
     cpc_history.to_csv(args.output / "cpc_training_history.csv", index=False)
     cpc_cache = embed_records(cpc, raw_scaled, device)
-    torch.save({"state_dict": cpc.state_dict(), "psd_center": psd_center, "psd_scale": psd_scale,
+    cpc_state = copy.deepcopy(cpc.state_dict())
+    center = healthy_center(cpc, train_segments, args.batch_size, device)
+    cpc, compact_history = train_compact_cpc(cpc, train_segments, val_segments, center, args, device)
+    compact_history.to_csv(args.output / "compact_training_history.csv", index=False)
+    compact_cache = embed_records(cpc, raw_scaled, device)
+    torch.save({"cpc_state_dict": cpc_state, "compact_state_dict": cpc.state_dict(),
+                "healthy_center": center.cpu(), "psd_center": psd_center, "psd_scale": psd_scale,
                 "args": vars(args)}, args.output / "healthy_cpc.pt")
 
     frame_parts = (source_train, target_train, source_val, target_val, val_rows, test_rows)
@@ -280,7 +353,8 @@ def main():
     if unknown: raise ValueError(f"Unknown backbones: {sorted(unknown)}")
     summaries, scores = [], []
     for backbone in selected:
-        for variant, cache in (("logpsd", raw_scaled), ("healthy_cpc", cpc_cache)):
+        for variant, cache in (("logpsd", raw_scaled), ("healthy_cpc", cpc_cache),
+                               ("compact_cpc", compact_cache)):
             summary, validation, test = runners[backbone](variant, cache, frame_parts, args, device, args.output)
             summaries.append(summary); validation.insert(0, "backbone", backbone); validation.insert(1, "preprocessing", variant)
             test.insert(0, "backbone", backbone); test.insert(1, "preprocessing", variant); scores.append(test)
@@ -295,15 +369,18 @@ def main():
     state_scores.to_csv(args.output / "locked_test_state_scores.csv", index=False)
     deltas = []
     for backbone in selected:
-        base = summary[(summary.backbone.str.contains(backbone.split('_')[0], case=False, na=False)) & (summary.preprocessing == "logpsd")]
-        # Backbone labels are paper names; match using iteration order instead of string heuristics.
         pair = summary.iloc[[i for i, row in summary.iterrows() if row.preprocessing in {"logpsd", "healthy_cpc"}
-                             and ((backbone == "target_source" and "target_source" in row.backbone.lower())
-                                  or (backbone == "procrustes" and "procrustes" in row.backbone.lower()))]]
-        raw_row = pair[pair.preprocessing == "logpsd"].iloc[0]; cpc_row = pair[pair.preprocessing == "healthy_cpc"].iloc[0]
-        deltas.append({"backbone": backbone, "delta_auroc": cpc_row.auroc - raw_row.auroc,
-                       "delta_balanced_accuracy": cpc_row.balanced_accuracy - raw_row.balanced_accuracy,
-                       "delta_f1": cpc_row.f1 - raw_row.f1, "delta_specificity": cpc_row.specificity - raw_row.specificity})
+                             or row.preprocessing == "compact_cpc"]]
+        pair = pair[((pair.backbone.str.contains("target_source", case=False) if backbone == "target_source"
+                      else pair.backbone.str.contains("procrustes", case=False)))]
+        raw_row = pair[pair.preprocessing == "logpsd"].iloc[0]
+        for variant in ("healthy_cpc", "compact_cpc"):
+            changed = pair[pair.preprocessing == variant].iloc[0]
+            deltas.append({"backbone": backbone, "preprocessing": variant,
+                           "delta_auroc": changed.auroc - raw_row.auroc,
+                           "delta_balanced_accuracy": changed.balanced_accuracy - raw_row.balanced_accuracy,
+                           "delta_f1": changed.f1 - raw_row.f1,
+                           "delta_specificity": changed.specificity - raw_row.specificity})
     delta = pd.DataFrame(deltas); delta.to_csv(args.output / "cpc_deltas.csv", index=False)
     metadata = {"paper_idea": "Yang et al., Computers in Industry 2023, 103878",
                 "doi": "10.1016/j.compind.2023.103878", "author_code_used": False,
