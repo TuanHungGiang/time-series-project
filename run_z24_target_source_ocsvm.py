@@ -119,6 +119,8 @@ def main():
     p.add_argument("--mode-separation", type=float, default=.5)
     p.add_argument("--tracking-radius", type=float, default=.45)
     p.add_argument("--record-quantile", type=float, default=.95)
+    p.add_argument("--preprocessing", choices=["modal", "regime_cointegration"], default="modal")
+    p.add_argument("--cointegration-rank", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -144,11 +146,16 @@ def main():
             print(f"spectra={i}/{len(needed)}", flush=True)
     anchors = modal.learn_anchors([spectra[x] for x in source_train.record_id], frequency,
                                   args.modes, args.mode_separation)
-    features = {key: modal.track_modes(frequency, value, anchors, args.tracking_radius)
+    tracker = modal.track_modes_centroid if args.preprocessing == "regime_cointegration" else modal.track_modes
+    features = {key: tracker(frequency, value, anchors, args.tracking_radius)
                 for key, value in spectra.items()}
     source_raw = np.concatenate([features[x] for x in source_train.record_id])
     center, spread = modal.robust_scaler(source_raw)
     scaled = {key: modal.scale(value, center, spread) for key, value in features.items()}
+    cointegration = None
+    if args.preprocessing == "regime_cointegration":
+        scaled, cointegration = modal.cointegration_features(
+            scaled, needed, source_train, args.cointegration_rank)
     source_x = np.concatenate([scaled[x] for x in source_train.record_id])
     target_x = np.concatenate([scaled[x] for x in target_train.record_id])
     target_val_x = np.concatenate([scaled[x] for x in target_val.record_id])
@@ -190,7 +197,7 @@ def main():
         records=("record_id", "size"), score=("score", "median"), alarm_rate=("alarm", "mean"))
     states["alarm"] = states.alarm_rate >= .5
     states.to_csv(args.output / "locked_test_state_scores.csv", index=False)
-    summary = {"method": "MSSP2026_target_to_source_mapping_OCSVM",
+    summary = {"method": f"MSSP2026_target_to_source_mapping_OCSVM_{args.preprocessing}",
                "source_healthy_train": len(source_train), "target_healthy_mapper_train": len(target_train),
                "damage_used_for_fit": False, "damage_used_for_threshold": False,
                "threshold_rule": "native OCSVM decision boundary",
@@ -200,6 +207,7 @@ def main():
     pd.DataFrame([summary]).to_csv(args.output / "metrics.csv", index=False)
     torch.save({"mapper_state_dict": mapper.state_dict(), "center": center, "spread": spread,
                 "anchors": anchors, "pair_index": pair_index, "val_pair_index": val_pair_index,
+                "cointegration_models": cointegration.models if cointegration else None,
                 "ocsvm_support": ocsvm.support_vectors_, "args": vars(args)}, args.output / "model.pt")
     metadata = {
         "paper": "Heravi et al., MSSP 242 (2026) 113673",
@@ -207,6 +215,9 @@ def main():
         "reproduced": ["target-healthy to source-healthy neural mapping", "source-only one-class SVM", "zero damage fitting"],
         "unspecified_by_paper_adapter": "nearest-source pairing of modal observations, fit on healthy train only",
         "domain_rule": "S01--S07 source/pre-lifting; S08+ target/post-lifting",
+        "preprocessing": args.preprocessing,
+        "cointegration_audit": cointegration.audit() if cointegration else None,
+        "cointegration_note": "AVT/FVT-conditioned Johansen equation adaptation of Shi et al., MSSP 2018; continuous peak-centroid modes; S01/train fit only",
         "parameters": vars(args),
     }
     (args.output / "run_metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
@@ -229,3 +240,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
