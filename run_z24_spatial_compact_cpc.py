@@ -257,6 +257,170 @@ def embed_spatial(model, cache, max_sensors, device):
     return result
 
 
+def paired_healthy_segments(cache, source_rows, target_rows, length, stride,
+                            max_sensors):
+    """Match only healthy train records sharing excitation and setup.
+
+    Pairing is fixed entirely by manifest metadata.  No damage state or score
+    participates.  Segment indices are paired only within a matched record;
+    the refinement loss compares segment distributions rather than assuming
+    sample-level phase synchronisation across campaigns.
+    """
+    target_index = {(str(row.excitation).lower(), int(row.setup)): row.record_id
+                    for row in target_rows.itertuples()}
+    source_parts, source_masks, target_parts, target_masks, audit = [], [], [], [], []
+    for row in source_rows.itertuples():
+        key = (str(row.excitation).lower(), int(row.setup))
+        if key not in target_index:
+            continue
+        source_x, source_mask = spatial_segments([cache[row.record_id]], length,
+                                                 stride, max_sensors)
+        target_id = target_index[key]
+        target_x, target_mask = spatial_segments([cache[target_id]], length,
+                                                 stride, max_sensors)
+        count = min(len(source_x), len(target_x))
+        source_parts.append(source_x[:count]); source_masks.append(source_mask[:count])
+        target_parts.append(target_x[:count]); target_masks.append(target_mask[:count])
+        audit.append({"excitation": key[0], "setup": key[1],
+                      "source_record": row.record_id, "target_record": target_id,
+                      "paired_segments": count})
+    if not source_parts:
+        raise ValueError("No matched S01/S08 healthy train pairs")
+    return (np.concatenate(source_parts), np.concatenate(source_masks),
+            np.concatenate(target_parts), np.concatenate(target_masks),
+            pd.DataFrame(audit))
+
+
+def _off_diagonal_covariance(x: torch.Tensor) -> torch.Tensor:
+    x = x - x.mean(dim=0)
+    covariance = x.T @ x / max(len(x) - 1, 1)
+    return (covariance - torch.diag(torch.diag(covariance))).pow(2).sum() / covariance.shape[0]
+
+
+def paired_distribution_loss(source_context, target_context, args):
+    """VICReg-style healthy domain invariance without temporal phase pairing."""
+    source_summary = source_context.mean(dim=1)
+    target_summary = target_context.mean(dim=1)
+    invariance = (1. - F.cosine_similarity(source_summary, target_summary, dim=-1).mean() +
+                  .1 * F.mse_loss(source_summary, target_summary))
+    combined = torch.cat([source_context.reshape(-1, source_context.shape[-1]),
+                          target_context.reshape(-1, target_context.shape[-1])])
+    variance = F.relu(args.variance_target -
+                      torch.sqrt(combined.var(dim=0) + 1e-4)).mean()
+    covariance = _off_diagonal_covariance(combined)
+    return invariance, variance, covariance
+
+
+@torch.no_grad()
+def paired_validation_loss(model, source, source_mask, target, target_mask,
+                           args, device):
+    """Healthy-only validation distribution discrepancy; setup pairing not required."""
+    model.eval()
+
+    def contexts(values, masks):
+        output = []
+        data = TensorDataset(torch.from_numpy(values), torch.from_numpy(masks))
+        for x, mask in DataLoader(data, batch_size=args.batch_size):
+            output.append(model.embed(x.to(device), mask.to(device)).mean(dim=1))
+        return torch.cat(output)
+
+    source_z, target_z = contexts(source, source_mask), contexts(target, target_mask)
+    mean_loss = F.mse_loss(source_z.mean(dim=0), target_z.mean(dim=0))
+    source_centered = source_z - source_z.mean(dim=0)
+    target_centered = target_z - target_z.mean(dim=0)
+    source_cov = source_centered.T @ source_centered / max(len(source_z) - 1, 1)
+    target_cov = target_centered.T @ target_centered / max(len(target_z) - 1, 1)
+    covariance_loss = F.mse_loss(source_cov, target_cov)
+    return float((mean_loss + .1 * covariance_loss).cpu())
+
+
+def train_paired_vicreg(model, paired, source_validation, target_validation,
+                        args, device):
+    """Remove lifting-domain information using matched healthy train pairs."""
+    sx, sm, tx, tm = paired
+    sv, svm = source_validation; tv, tvm = target_validation
+    dataset = TensorDataset(torch.from_numpy(sx), torch.from_numpy(sm),
+                            torch.from_numpy(tx), torch.from_numpy(tm))
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.paired_lr,
+                                 weight_decay=args.weight_decay)
+    best, state, stale, history = float("inf"), None, 0, []
+    for epoch in range(1, args.paired_epochs + 1):
+        model.train(); totals, invariances = [], []
+        for source_x, source_mask, target_x, target_mask in loader:
+            source_x, source_mask = source_x.to(device), source_mask.to(device)
+            target_x, target_mask = target_x.to(device), target_mask.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            source_view = spatial_view(source_x, source_mask, args.aug_noise,
+                                       args.mask_probability)
+            target_view = spatial_view(target_x, target_mask, args.aug_noise,
+                                       args.mask_probability)
+            source_context = model.embed(source_view, source_mask)
+            target_context = model.embed(target_view, target_mask)
+            invariance, variance, covariance = paired_distribution_loss(
+                source_context, target_context, args)
+            predictive = .5 * (
+                model.predictive_loss(source_view, source_mask, args.temperature) +
+                model.predictive_loss(target_view, target_mask, args.temperature))
+            loss = (args.paired_domain_weight * invariance +
+                    args.paired_cpc_weight * predictive +
+                    args.variance_weight * variance +
+                    args.covariance_weight * covariance)
+            loss.backward(); optimizer.step()
+            totals.append(float(loss.detach().cpu()))
+            invariances.append(float(invariance.detach().cpu()))
+        validation = paired_validation_loss(model, sv, svm, tv, tvm, args, device)
+        history.append({"epoch": epoch, "train_objective": np.mean(totals),
+                        "paired_invariance": np.mean(invariances),
+                        "healthy_domain_val_loss": validation})
+        if validation < best - 1e-6:
+            best, state, stale = validation, copy.deepcopy(model.state_dict()), 0
+        else:
+            stale += 1
+        if epoch == 1 or epoch % 10 == 0:
+            print(f"paired-vicreg epoch={epoch}/{args.paired_epochs} "
+                  f"train={np.mean(totals):.6f} val-domain={validation:.6f}", flush=True)
+        if stale >= args.paired_patience:
+            break
+    if state is None:
+        raise RuntimeError("Paired VICReg produced no checkpoint")
+    model.load_state_dict(state)
+    return model, pd.DataFrame(history)
+
+
+def nuisance_projection(cache, source_rows, target_rows, rank):
+    """Project out paired healthy S08-S01 difference directions."""
+    target_index = {(str(row.excitation).lower(), int(row.setup)): row.record_id
+                    for row in target_rows.itertuples()}
+    differences = []
+    pair_count = 0
+    for row in source_rows.itertuples():
+        key = (str(row.excitation).lower(), int(row.setup))
+        if key not in target_index:
+            continue
+        source = cache[row.record_id]
+        target = interpolate_rows(cache[target_index[key]], len(source))
+        differences.append(target - source); pair_count += 1
+    if not differences:
+        raise ValueError("No healthy pairs for nuisance projection")
+    matrix = np.concatenate(differences)
+    # Do not mean-centre: the mean lifting direction is itself nuisance.
+    _, singular, vt = np.linalg.svd(matrix, full_matrices=False)
+    rank = max(1, min(rank, vt.shape[0]))
+    basis = vt[:rank].T.astype(np.float32)
+    projection = np.eye(basis.shape[0], dtype=np.float32) - basis @ basis.T
+    source_center = np.mean(np.concatenate([cache[x] for x in source_rows.record_id]),
+                            axis=0).astype(np.float32)
+    transformed = {key: ((value - source_center) @ projection).astype(np.float32)
+                   for key, value in cache.items()}
+    energy = singular ** 2
+    audit = {"rank": rank, "healthy_pair_count": pair_count,
+             "explained_nuisance_energy": float(energy[:rank].sum() /
+                                                 max(energy.sum(), 1e-12)),
+             "singular_values": singular[:min(8, len(singular))].tolist()}
+    return transformed, basis, audit
+
+
 def interpolate_rows(value: np.ndarray, length: int) -> np.ndarray:
     if len(value) == length:
         return value.astype(np.float32)
@@ -406,6 +570,10 @@ def main():
     p.add_argument("--consistency-weight", type=float, default=.5); p.add_argument("--compact-cpc-weight", type=float, default=.2)
     p.add_argument("--variance-weight", type=float, default=.25); p.add_argument("--covariance-weight", type=float, default=.05)
     p.add_argument("--variance-target", type=float, default=1.)
+    p.add_argument("--paired-epochs", type=int, default=30); p.add_argument("--paired-patience", type=int, default=8)
+    p.add_argument("--paired-lr", type=float, default=2e-4)
+    p.add_argument("--paired-domain-weight", type=float, default=1.)
+    p.add_argument("--paired-cpc-weight", type=float, default=.2)
     p.add_argument("--modal-window", type=int, default=8192); p.add_argument("--modal-stride", type=int, default=4096)
     p.add_argument("--modal-fmax", type=float, default=20.); p.add_argument("--modes", type=int, default=6)
     p.add_argument("--mode-separation", type=float, default=.5); p.add_argument("--tracking-radius", type=float, default=.45)
@@ -486,8 +654,29 @@ def main():
                                    validation_mask, args, device, args.compact_epochs,
                                    args.compact_patience, args.compact_lr, healthy, True)
     spatial_anti = embed_spatial(anti_model, scaled, max_sensors, device)
+    paired_sx, paired_sm, paired_tx, paired_tm, pair_audit = paired_healthy_segments(
+        scaled, source_train, target_train, args.context_length,
+        args.segment_stride, max_sensors)
+    target_validation, target_validation_mask = spatial_segments(
+        [scaled[x] for x in target_val.record_id], args.context_length,
+        args.segment_stride, max_sensors)
+    paired_model = copy.deepcopy(anti_model)
+    paired_model, h4 = train_paired_vicreg(
+        paired_model, (paired_sx, paired_sm, paired_tx, paired_tm),
+        (validation, validation_mask),
+        (target_validation, target_validation_mask), args, device)
+    paired_cache = embed_spatial(paired_model, scaled, max_sensors, device)
+    nuisance_r1, nuisance_basis_r1, nuisance_audit_r1 = nuisance_projection(
+        paired_cache, source_train, target_train, rank=1)
+    nuisance_r2, nuisance_basis_r2, nuisance_audit_r2 = nuisance_projection(
+        paired_cache, source_train, target_train, rank=2)
+    pair_audit.to_csv(args.output / "paired_healthy_manifest.csv", index=False)
+    (args.output / "nuisance_projection_audit.json").write_text(
+        json.dumps({"rank1": nuisance_audit_r1, "rank2": nuisance_audit_r2},
+                   indent=2), encoding="utf-8")
     pd.concat([h1, h2, h3], ignore_index=True).to_csv(
         args.output / "spatial_training_history.csv", index=False)
+    h4.to_csv(args.output / "paired_vicreg_history.csv", index=False)
 
     modes, anchors = modal_cache(frame, source_train, args)
     fused = {key: np.concatenate([value, interpolate_rows(modes[key], len(value))], axis=1)
@@ -496,7 +685,10 @@ def main():
                 "spatial_cpc": spatial_cpc,
                 "spatial_compact": spatial_compact,
                 "spatial_vicreg_compact": spatial_anti,
-                "spatial_vicreg_modal_fusion": fused}
+                "spatial_vicreg_modal_fusion": fused,
+                "paired_healthy_vicreg": paired_cache,
+                "paired_vicreg_nuisance_r1": nuisance_r1,
+                "paired_vicreg_nuisance_r2": nuisance_r2}
     parts = (source_train, target_train, source_val, target_val, test_rows)
     summaries, scores = [], []
     for name, cache in variants.items():
@@ -543,16 +735,22 @@ def main():
     torch.save({"spatial_cpc": initial_state,
                 "spatial_compact": compact_model.state_dict(),
                 "spatial_vicreg_compact": anti_model.state_dict(),
+                "paired_healthy_vicreg": paired_model.state_dict(),
                 "healthy_center": healthy.cpu(), "psd_center": center,
                 "psd_scale": scale, "modal_anchors": anchors,
                 "median_psd_center": median_center,
                 "median_psd_scale": median_scale,
+                "nuisance_basis_rank1": nuisance_basis_r1,
+                "nuisance_basis_rank2": nuisance_basis_r2,
                 "max_sensors": max_sensors, "args": vars(args)},
                args.output / "spatial_compact_cpc.pt")
     metadata = {
         "protocol": "representation/scalers/anchors S01 train; early stop and thresholds S01 val; damage evaluation only",
         "s08_use": "downstream Procrustes healthy alignment only, not preprocessing",
         "domain_calibration": "S01-val calibrates source; S08-val calibrates target; damage excluded",
+        "paired_invariance": "S01/S08 healthy train pairs sharing excitation+setup; damage excluded",
+        "nuisance_projection": {"rank1": nuisance_audit_r1,
+                                "rank2": nuisance_audit_r2},
         "variants": list(variants), "elapsed_seconds": time.time() - started,
         "warning": "proposed equation adaptation; not author code",
         "parameters": vars(args),
