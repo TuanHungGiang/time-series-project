@@ -122,6 +122,8 @@ def main():
     p.add_argument("--tracking-radius", type=float, default=.45)
     p.add_argument("--threshold-quantile", type=float, default=.99)
     p.add_argument("--record-quantile", type=float, default=.95)
+    p.add_argument("--preprocessing", choices=["modal", "regime_cointegration"], default="modal")
+    p.add_argument("--cointegration-rank", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args(); args.output.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -151,11 +153,16 @@ def main():
             print(f"spectra={i}/{len(needed)}", flush=True)
     anchors = modal.learn_anchors([spectra[x] for x in source_train.record_id], frequency,
                                   args.modes, args.mode_separation)
-    features = {key: modal.track_modes(frequency, value, anchors, args.tracking_radius)
+    tracker = modal.track_modes_centroid if args.preprocessing == "regime_cointegration" else modal.track_modes
+    features = {key: tracker(frequency, value, anchors, args.tracking_radius)
                 for key, value in spectra.items()}
     source_raw = np.concatenate([features[x] for x in source_train.record_id])
     center, spread = modal.robust_scaler(source_raw)
     scaled = {key: modal.scale(value, center, spread) for key, value in features.items()}
+    cointegration = None
+    if args.preprocessing == "regime_cointegration":
+        scaled, cointegration = modal.cointegration_features(
+            scaled, needed, source_train, args.cointegration_rank)
     source_x = np.concatenate([scaled[x] for x in source_train.record_id])
     target_x = np.concatenate([scaled[x] for x in target_train.record_id])
     source_val_x = np.concatenate([scaled[x] for x in source_val.record_id])
@@ -191,7 +198,7 @@ def main():
         records=("record_id", "size"), score=("score", "median"), alarm_rate=("alarm", "mean"))
     states["alarm"] = states.alarm_rate >= .5
     states.to_csv(args.output / "locked_test_state_scores.csv", index=False)
-    summary = {"method": "MSSP2026_natural_frequency_AE_OrthogonalProcrustes",
+    summary = {"method": f"MSSP2026_AE_OrthogonalProcrustes_{args.preprocessing}",
                "source_healthy_train": len(source_train), "target_healthy_alignment": len(target_train),
                "damage_used_for_fit": False, "damage_used_for_threshold": False,
                "epochs_run": int(history.epoch.max()), "seconds": time.time() - started,
@@ -201,6 +208,7 @@ def main():
     pd.DataFrame([summary]).to_csv(args.output / "metrics.csv", index=False)
     torch.save({"state_dict": model.state_dict(), "center": center, "spread": spread,
                 "anchors": anchors, "rotation": rotation, "threshold": threshold,
+                "cointegration_models": cointegration.models if cointegration else None,
                 "args": vars(args)}, args.output / "model.pt")
     metadata = {
         "paper": "Nogueira et al., MSSP 261 (2026) 115013",
@@ -209,6 +217,9 @@ def main():
                             "Xhat_t = Decoder_s(Zt*)", "MSE"],
         "z24_adapter": "fixed modal anchors learned from S01 healthy train; pre/post lifting defines source/target",
         "alignment": "12 S01 and 12 S08 healthy train records only; no damage",
+        "preprocessing": args.preprocessing,
+        "cointegration_audit": cointegration.audit() if cointegration else None,
+        "cointegration_note": "AVT/FVT-conditioned Johansen equation adaptation of Shi et al., MSSP 2018; continuous peak-centroid modes; S01/train fit only",
         "causal_deconfounding_not_run": "record-level temperature/environment metadata absent from manifest",
         "parameters": vars(args),
     }
@@ -232,3 +243,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
