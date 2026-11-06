@@ -539,3 +539,19 @@ python run_prism_z24.py --split setup --batch_size 32 --lr_schedule cosine   --e
 
 Ablation without augmentation: add `--no_augment`.
 
+### Spatial Compact-CPC ablation (strict healthy-only)
+
+The spatial follow-up first reruns the current sensor-median Compact-CPC as a
+paired control, then keeps every vertical sensor and tests learned set
+attention/mean/max pooling, compact refinement,
+variance-covariance anti-collapse regularisation, modal fusion, and a
+healthy-only EVT threshold.  Representation fitting, modal anchors, scaling,
+early stopping, and thresholds do not use damage.
+
+```bash
+python kaggle/z24_spatial_compact_cpc_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --cpc-epochs 50 --compact-epochs 30 \
+  --downstream-epochs 100 --patience 20 --batch-size 32
+```
+
