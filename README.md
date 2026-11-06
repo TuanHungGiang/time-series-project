@@ -310,6 +310,27 @@ augmented. Add `--no_augment` for a no-augmentation ablation on this pipeline.
 
 ## Run on Kaggle
 
+### Healthy-only CPC preprocessing ablation
+
+This experiment follows the healthy-only contrastive predictive representation
+idea of Yang et al. (Computers in Industry 2023, DOI
+`10.1016/j.compind.2023.103878`). It trains CPC only on S01/train temporal PSD
+sequences, freezes the encoder, and compares direct log-PSD against the same CPC
+embedding for Target-to-Source+OCSVM and AE+Procrustes:
+
+```python
+!git -C /kaggle/working/time-series-project pull origin main
+!python -u /kaggle/working/time-series-project/kaggle/z24_healthy_cpc_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --backbones target_source,procrustes --cpc-epochs 50 \
+  --downstream-epochs 100 --patience 20 --batch-size 32
+```
+
+Outputs are saved to `/kaggle/working/z24_healthy_cpc`. `cpc_deltas.csv` is the
+primary preprocessing ablation. No time warp, resampling, or frequency shifting
+is used. This is a disclosed equation/workflow adaptation because author code
+was not available; it must not be described as an official reproduction.
+
 ### Regime-conditioned cointegration preprocessing ablation
 
 This ablation applies the same S01/train-only Johansen residualisation to the
