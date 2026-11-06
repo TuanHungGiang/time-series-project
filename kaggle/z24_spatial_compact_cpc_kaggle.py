@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--cpc-epochs", type=int, default=50)
     parser.add_argument("--compact-epochs", type=int, default=30)
+    parser.add_argument("--paired-epochs", type=int, default=30)
     parser.add_argument("--downstream-epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -29,6 +30,7 @@ def main():
                "--output", "/kaggle/working/z24_spatial_compact_cpc",
                "--cpc-epochs", args.cpc_epochs,
                "--compact-epochs", args.compact_epochs,
+               "--paired-epochs", args.paired_epochs,
                "--downstream-epochs", args.downstream_epochs,
                "--downstream-patience", args.patience,
                "--batch-size", args.batch_size]
