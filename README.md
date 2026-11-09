@@ -606,3 +606,25 @@ as scientific results. Outputs are written to
 `/kaggle/working/z24_preprocessing_selection`, including validation rankings,
 the selected-only test result, all curves/scores, a checkpoint, and explicit
 leakage metadata.
+
+### Step 1B: deterministic preprocessing across multiple detectors
+
+The spatial benchmark above showed that learned sensor pooling is a model
+component, not a universal preprocessing. The follow-up therefore compares
+five deterministic feature pipelines on the identical OCSVM, PCA, Isolation
+Forest, and autoencoder detectors: logPSD control, domain-conditioned CM-HRR,
+ACF, modal peak tracking, and modal centroid tracking. All 24 S01/S08 healthy
+train records fit the transforms/detectors. Validation damage selects a
+preprocessing; only the selected transform is scored on locked test.
+
+```bash
+python kaggle/z24_deterministic_preprocessing_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --seeds 11,22,33,44,55 --epochs 50 --patience 10 --batch-size 256
+```
+
+The selection rule requires improvement on at least three of four detectors
+and permits no detector to lose more than 0.02 validation AUROC. If no
+candidate passes, the runner retains logPSD and records that no universal
+improvement was demonstrated. Use `--seeds 11 --epochs 2 --patience 2` only
+for a pipeline smoke test.
