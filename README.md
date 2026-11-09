@@ -699,3 +699,24 @@ second command renders `/kaggle/working/z24_centroid_final/FINAL_PREPROCESSING_R
 as a compact notebook report, while detailed CSV files remain available for
 the paper appendix.
 
+### Z24 proposed method: Modal-IDK-NIW
+
+After preprocessing development, `run_z24_modal_idk_niw.py` evaluates the
+predeclared distributional Bayesian core on the same whole-record split. It
+uses four continuous modal-centroid sequences per record, IDK distribution
+embeddings, an eight-dimensional train-only projection, and hierarchical NIW
+posteriors conditioned on pre/post-lifting domain and AVT/FVT regime. Setup-
+grouped healthy OOF scores calibrate the threshold. Damage never fits a model,
+projection, score reference or threshold.
+
+```bash
+python kaggle/z24_modal_idk_niw_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split
+python kaggle/show_z24_proposed_result.py
+```
+
+Outputs are written to `/kaggle/working/z24_modal_idk_niw`. The primary result
+is always `modal_idk_niw_regime_domain`; Gaussian, IDK-L2, modal-NIW and pooled
+IDK-NIW rows are fixed ablations and may not replace the primary method after
+test inspection.
+
