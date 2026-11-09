@@ -681,3 +681,21 @@ Selection outputs are placed in
 anchor stability, and tracking-boundary audits are placed in
 `/kaggle/working/z24_preprocessing_lock_sensitivity`.
 
+After the corrected benchmark selects continuous modal centroid, run the
+final interaction check with concise output:
+
+```bash
+python kaggle/z24_centroid_final_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --seeds 11,22,33,44,55 --models ocsvm,pca,iforest,ae \
+  --epochs 50 --patience 10 --batch-size 256
+python kaggle/show_z24_preprocessing_result.py
+```
+
+It compares the predeclared centroid control against 4-mode, 4096-window,
+0.70-Hz separation, and their limited interactions. Validation chooses one
+eligible configuration; only that configuration is scored on test. The
+second command renders `/kaggle/working/z24_centroid_final/FINAL_PREPROCESSING_REPORT.md`
+as a compact notebook report, while detailed CSV files remain available for
+the paper appendix.
+
