@@ -628,3 +628,33 @@ and permits no detector to lose more than 0.02 validation AUROC. If no
 candidate passes, the runner retains logPSD and records that no universal
 improvement was demonstrated. Use `--seeds 11 --epochs 2 --patience 2` only
 for a pipeline smoke test.
+
+### Step 2: calibrate the locked modal pipeline with EVT
+
+`run_z24_modal_evt_calibration.py` leaves `modal_peak` and the four detectors
+unchanged and implements the block-extreme GEV alarm rule from Toshkova et
+al. (MSSP 2020, DOI `10.1016/j.ymssp.2019.106417`). Modal anchors and detector
+scores are cross-fitted using setup-grouped healthy train folds. AVT/FVT is
+the known operational regime. Neither damage validation nor locked test data
+fits a feature, detector, score reference, GEV distribution, or threshold.
+
+The runner reports predeclared `max_healthy`, empirical quantile, and GEV
+controls, each pooled and excitation-conditioned. Failed or under-powered GEV
+fits stay visible in the audit and are never silently replaced. The default
+record q95 preserves the established robust record score; pass
+`--record-quantile 1.0` for literal block maxima as in the paper.
+
+```bash
+python kaggle/z24_modal_evt_calibration_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --models ocsvm,pca,iforest,ae --seeds 11,22,33,44,55 \
+  --alpha 0.05 --bootstrap-samples 200 \
+  --epochs 50 --patience 10 --batch-size 256
+```
+
+For a non-reportable smoke test use `--models ocsvm,pca --seeds 11
+--bootstrap-samples 20 --epochs 2 --patience 2`. Outputs are written to
+`/kaggle/working/z24_modal_evt`, including OOF scores, thresholds, GEV
+parameters and confidence intervals, record-level decisions, fit diagnostics,
+and explicit leakage metadata.
+
