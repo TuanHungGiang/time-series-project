@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--pca-components", type=int, default=3)
     args = parser.parse_args()
     root = args.data_root.expanduser().resolve()
     if root.name in {"train", "val", "test", "metadata", "_excluded"}:
@@ -36,6 +37,7 @@ def main():
         "--models", args.models, "--seeds", args.seeds,
         "--epochs", args.epochs, "--patience", args.patience,
         "--batch-size", args.batch_size,
+        "--pca-components", args.pca_components,
     ]
     print("+", " ".join(map(str, command)), flush=True)
     subprocess.run(list(map(str, command)), check=True)
