@@ -582,3 +582,27 @@ python kaggle/z24_spatial_compact_cpc_kaggle.py \
   --downstream-epochs 100 --patience 20 --batch-size 32
 ```
 
+### Step 1: select spatial preprocessing before improving the method
+
+`run_z24_preprocessing_selection.py` is the clean replacement for choosing a
+pooling rule from repeated locked-test inspection. It compares sensor mean,
+attention, mean+attention+max, AvgTopK, and true sensor-level trimmed AvgTopK.
+Every variant is trained with the same independent seeds. Damage never fits a
+scaler, representation, AE, Procrustes rotation, or threshold. Validation
+damage selects exactly one preprocessing by mean validation AUROC; only that
+winner is then scored on the locked test.
+
+```bash
+python kaggle/z24_preprocessing_selection_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --seeds 11,22,33,44,55 \
+  --cpc-epochs 50 --compact-epochs 30 \
+  --downstream-epochs 100 --patience 20 --batch-size 32
+```
+
+For a pipeline-only smoke test, use `--seeds 11 --cpc-epochs 1
+--compact-epochs 1 --downstream-epochs 2`. Smoke results must not be reported
+as scientific results. Outputs are written to
+`/kaggle/working/z24_preprocessing_selection`, including validation rankings,
+the selected-only test result, all curves/scores, a checkpoint, and explicit
+leakage metadata.
