@@ -114,7 +114,13 @@ class PCADetector(Detector):
         self.components = components; self.seed = seed; self.scaler = RobustScaler(); self.model = None
     def fit(self, train, val=None):
         z = self.scaler.fit_transform(train)
-        n = max(2, min(self.components, len(z) - 1, z.shape[1]))
+        # A reconstruction-error PCA detector must discard at least one
+        # feature.  Keeping every modal feature makes the reconstruction
+        # error numerical round-off rather than an anomaly score.
+        upper = min(len(z) - 1, z.shape[1] - 1)
+        if upper < 1:
+            raise ValueError(f"PCA detector needs >=2 features/samples, got {z.shape}")
+        n = max(1, min(self.components, upper))
         self.model = PCA(n_components=n, random_state=self.seed).fit(z)
     def score(self, x):
         z = self.scaler.transform(x); rec = self.model.inverse_transform(self.model.transform(z))
