@@ -658,3 +658,26 @@ For a non-reportable smoke test use `--models ocsvm,pca --seeds 11
 parameters and confidence intervals, record-level decisions, fit diagnostics,
 and explicit leakage metadata.
 
+### Final preprocessing lock audit
+
+The lock runner first repeats deterministic preprocessing selection after
+fixing PCA to retain fewer components than input features (`3` for the
+six-mode representation). It then runs a validation-only, one-factor-at-a-time
+robustness audit around the predeclared modal configuration. The sensitivity
+stage never loads or scores locked-test records and does not re-select the
+nominal configuration.
+
+```bash
+python kaggle/z24_preprocessing_lock_kaggle.py \
+  --data-root /kaggle/input/datasets/datnguyentien204/z24-dataset-my/kaggle_z24_split \
+  --seeds 11,22,33,44,55 --models ocsvm,pca,iforest,ae \
+  --epochs 50 --patience 10 --batch-size 256 --pca-components 3
+```
+
+Use `--seeds 11 --models ocsvm,pca --epochs 2 --patience 2
+--configurations locked,radius_030` only as a non-reportable smoke test.
+Selection outputs are placed in
+`/kaggle/working/z24_preprocessing_lock_selection`; sensitivity, grouped-OOF
+anchor stability, and tracking-boundary audits are placed in
+`/kaggle/working/z24_preprocessing_lock_sensitivity`.
+
