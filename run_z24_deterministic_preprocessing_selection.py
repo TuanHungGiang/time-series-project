@@ -428,7 +428,7 @@ def main():
     parser.add_argument("--cmhrr-clip", type=float, default=10.)
     parser.add_argument("--record-quantile", type=float, default=.95)
     parser.add_argument("--ocsvm-nu", type=float, default=.05)
-    parser.add_argument("--pca-components", type=int, default=12)
+    parser.add_argument("--pca-components", type=int, default=3)
     parser.add_argument("--ae-latent", type=int, default=12)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--patience", type=int, default=10)
