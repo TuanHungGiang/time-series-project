@@ -293,7 +293,14 @@ def main() -> None:
         model = models[row.excitation_resolved]
         reliability_calibration = reliability_calibrations[row.excitation_resolved]
         for condition in conditions:
-            repeats = 1 if args.mode == "quick" or condition == "clean" else 3
+            if condition == "clean":
+                repeats = 1
+            elif args.mode == "quick" and condition.startswith("targeted"):
+                # The quick gate must verify that the repaired targeted attack
+                # really produces distinct seeded realizations.
+                repeats = 3
+            else:
+                repeats = 1 if args.mode == "quick" else 3
             for replicate in range(repeats):
                 changed, availability, quality, signature = corrupt_v31(
                     signals, condition, str(row.record_id), replicate, model
