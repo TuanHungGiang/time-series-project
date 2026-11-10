@@ -129,6 +129,8 @@ It changes the evaluation protocol in four places:
 - accepted cohorts that lose either class are explicitly marked invalid;
 - stratified bootstrap confidence intervals and class-conditional coverage are
   reported;
+- recall and specificity use exact Clopper--Pearson intervals, avoiding the
+  degenerate `[1, 1]` bootstrap interval produced by very small healthy sets;
 - balanced AURC and reliability-to-error AUROC are added.
 
 Run the quick gate first:
@@ -158,6 +160,8 @@ If the quick run ends with `MODEL_A_V31_PASS`, run the full protocol:
 
 The new outputs are `bootstrap_ci.csv` and `risk_coverage.csv`, in addition to
 the V3 artifacts. An `accepted_status=invalid_missing_class` row is a fail-safe
-abstention result, not an accepted-subset performance improvement.
+abstention result, not an accepted-subset performance improvement. Treat rows
+with `accepted_low_class_support=True` as exploratory because fewer than five
+records remain in the minority class.
 
 
