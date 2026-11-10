@@ -75,3 +75,25 @@ Model selection uses healthy calibration consistency only. All 252 damage
 records remain evaluation-only. Outputs include `metrics.csv`,
 `record_scores.csv`, `risk_coverage.json`, `training_history.csv`, and
 `model_a.pt`.
+
+
+## Model A v1 decision and Model A v2
+
+The neural spectral reconstruction v1 is retained for reproducibility but was
+rejected at the quick gate (clean AUROC 0.4934). Do not run its full mode.
+
+Model A v2 preserves the frozen B2 damage score and adds a healthy-calibrated
+reliability layer based on leave-one-sensor-out score instability, sensor
+coverage, and observed-data quality. Run:
+
+```bash
+!git -C /kaggle/working/time-series-project pull origin codex/mdr-shm-kaggle
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_model_a_v2.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v2_quick \
+  --mode quick
+```
+
+The clean score must reproduce B2 exactly. The research question for v2 is
+whether abstention improves accepted-subset performance and risk--coverage
+under random and evidence-targeted sensor loss.
