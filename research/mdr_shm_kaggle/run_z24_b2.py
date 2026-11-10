@@ -49,7 +49,14 @@ def build_file_index(root: Path) -> dict[str, list[Path]]:
     return index
 
 
-def resolve_source(row: pd.Series, index: dict[str, list[Path]]) -> Path:
+def resolve_source(
+    row: pd.Series, index: dict[str, list[Path]], dataset_root: Path
+) -> Path:
+    relative = str(row.get("relative_path", ""))
+    if relative and relative.lower() != "nan":
+        candidate = dataset_root / Path(relative)
+        if candidate.exists():
+            return candidate
     raw = str(row.get("source_path", row.get("path", "")))
     direct = Path(raw)
     if direct.exists():
@@ -251,15 +258,22 @@ def main() -> None:
 
     manifest_path = find_manifest(args.input_root)
     frame = pd.read_csv(manifest_path)
-    frame["role"] = frame["role"].astype(str).str.lower().replace({"val": "calibration"})
     frame["label"] = frame["label"].astype(int)
+    if "role" not in frame.columns:
+        frame["role"] = frame["split"]
+    frame["role"] = frame["role"].astype(str).str.lower().replace({"val": "calibration"})
+    # All damaged records are evaluation-only, including files packaged under val/damage.
+    frame.loc[frame["label"] == 1, "role"] = "test"
     frame = frame[frame["role"].isin(["train", "calibration", "test"])].copy()
     if frame.empty:
         raise RuntimeError("Manifest contains no train/calibration/test rows")
     if frame.loc[frame["role"].isin(["train", "calibration"]), "label"].ne(0).any():
         raise RuntimeError("Leakage: non-healthy record found in train/calibration")
-    index = build_file_index(args.input_root)
-    frame["resolved_path"] = [str(resolve_source(row, index)) for _, row in frame.iterrows()]
+    dataset_root = manifest_path.parent.parent
+    index = build_file_index(dataset_root)
+    frame["resolved_path"] = [
+        str(resolve_source(row, index, dataset_root)) for _, row in frame.iterrows()
+    ]
     frame["excitation_resolved"] = [excitation(row) for _, row in frame.iterrows()]
 
     models: dict[str, Model] = {}
