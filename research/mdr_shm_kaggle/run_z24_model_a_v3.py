@@ -108,15 +108,26 @@ def reliability_features(
         np.std(jackknife_values) / (abs(np.mean(jackknife_values)) + 0.10)
     )
 
-    log_psd = np.log10(sensor_psd[availability] + 1e-16)
-    sensor_median = np.median(log_psd, axis=0)
-    sensor_distances = np.sqrt(
-        np.mean((log_psd - sensor_median[None, :]) ** 2, axis=1)
+    present_psd = sensor_psd[availability]
+    log_psd = np.log10(present_psd + 1e-16)
+    high_band = frequencies >= 20.0
+    high_frequency_share = np.trapezoid(
+        present_psd[:, high_band], frequencies[high_band], axis=1
     )
-    cross_sensor_dispersion = float(np.median(sensor_distances))
-    local_global_ratio = float(
-        np.quantile(sensor_distances, 0.90)
-        / (np.median(sensor_distances) + 0.05)
+    hf_center = float(np.median(high_frequency_share))
+    hf_scale = float(
+        1.4826 * np.median(np.abs(high_frequency_share - hf_center))
+    )
+    high_frequency_outlier = float(
+        max(0.0, np.quantile(high_frequency_share, 0.90) - hf_center)
+        / max(hf_scale, 1e-4)
+    )
+    roughness = np.median(np.abs(np.diff(log_psd, axis=1)), axis=1)
+    rough_center = float(np.median(roughness))
+    rough_scale = float(1.4826 * np.median(np.abs(roughness - rough_center)))
+    spectral_roughness_outlier = float(
+        max(0.0, np.quantile(roughness, 0.90) - rough_center)
+        / max(rough_scale, 1e-3)
     )
 
     coverage = float(availability.mean())
@@ -126,8 +137,8 @@ def reliability_features(
             jackknife_instability,
             1.0 - coverage,
             1.0 - observed_quality,
-            cross_sensor_dispersion,
-            local_global_ratio,
+            high_frequency_outlier,
+            spectral_roughness_outlier,
         ],
         dtype=float,
     )
@@ -135,8 +146,8 @@ def reliability_features(
         "jackknife_instability": jackknife_instability,
         "sensor_coverage": coverage,
         "observed_quality": observed_quality,
-        "cross_sensor_dispersion": cross_sensor_dispersion,
-        "local_global_ratio": local_global_ratio,
+        "high_frequency_outlier": high_frequency_outlier,
+        "spectral_roughness_outlier": spectral_roughness_outlier,
         "jackknife_score_min": float(jackknife_values.min()),
         "jackknife_score_max": float(jackknife_values.max()),
     }
@@ -232,7 +243,7 @@ def calibrate_reliability(
     matrix = np.stack(vectors)
     center = np.median(matrix, axis=0)
     scale = 1.4826 * np.median(np.abs(matrix - center), axis=0)
-    floors = np.asarray([0.01, 0.02, 0.01, 0.02, 0.05])
+    floors = np.asarray([0.01, 0.02, 0.01, 0.10, 0.10])
     scale = np.maximum(scale, floors)
     positive_z = np.maximum((matrix - center) / scale, 0.0)
     raw_scores = np.sum(
