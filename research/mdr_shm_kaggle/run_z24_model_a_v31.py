@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import beta
 
 from run_z24_b2 import (
     features,
@@ -165,9 +166,26 @@ def bootstrap_intervals(
             boot[name].append(values[name])
 
     estimates = safe_metric_dict(labels, scores)
+    predictions = scores > 1.0
+    positive = labels == 1
+    negative = labels == 0
+    exact_counts = {
+        "recall": (int(np.sum(predictions & positive)), int(np.sum(positive))),
+        "specificity": (
+            int(np.sum(~predictions & negative)),
+            int(np.sum(negative)),
+        ),
+    }
     rows = []
     for name in METRIC_NAMES:
-        lower, upper = np.quantile(boot[name], [0.025, 0.975])
+        if name in exact_counts:
+            successes, trials = exact_counts[name]
+            lower, upper = clopper_pearson(successes, trials)
+            method = "clopper_pearson_exact"
+        else:
+            lower, upper = np.quantile(boot[name], [0.025, 0.975])
+            successes, trials = None, None
+            method = "stratified_percentile_bootstrap"
         rows.append(
             {
                 "subset": subset,
@@ -175,12 +193,33 @@ def bootstrap_intervals(
                 "estimate": estimates[name],
                 "ci_lower": float(lower),
                 "ci_upper": float(upper),
+                "interval_method": method,
+                "successes": successes,
+                "trials": trials,
                 "bootstrap_samples": samples,
                 "healthy_records": int(len(class_indices[0])),
                 "damage_records": int(len(class_indices[1])),
             }
         )
     return rows
+
+
+def clopper_pearson(
+    successes: int, trials: int, alpha: float = 0.05
+) -> tuple[float, float]:
+    if trials <= 0:
+        return float("nan"), float("nan")
+    lower = (
+        0.0
+        if successes == 0
+        else float(beta.ppf(alpha / 2.0, successes, trials - successes + 1))
+    )
+    upper = (
+        1.0
+        if successes == trials
+        else float(beta.ppf(1.0 - alpha / 2.0, successes + 1, trials - successes))
+    )
+    return lower, upper
 
 
 def reliability_error_auroc(group: pd.DataFrame) -> float:
@@ -359,6 +398,9 @@ def main() -> None:
             "damage_acceptance_rate": float(group.loc[damage, "accepted"].mean()),
             "accepted_valid_two_class_cohort": bool(accepted_valid),
             "accepted_status": "valid" if accepted_valid else "invalid_missing_class",
+            "accepted_low_class_support": bool(
+                accepted_valid and int(accepted_counts.min()) < 5
+            ),
             "reliability_error_auroc": reliability_error_auroc(group),
             "balanced_aurc": balanced_aurc(group),
         }
