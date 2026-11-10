@@ -97,3 +97,23 @@ coverage, and observed-data quality. Run:
 The clean score must reproduce B2 exactly. The research question for v2 is
 whether abstention improves accepted-subset performance and risk--coverage
 under random and evidence-targeted sensor loss.
+
+
+## Model A v3: corruption-specific selective reliability
+
+V2 is retained as a sensor-dropout baseline. V3 adds healthy-calibrated
+corruption diagnostics: high-frequency local outliers and spectral roughness,
+while treating coverage and explicit missing-time quality as soft evidence.
+Calibration contains only clean and mild conditions (missing 10%, noise 20 dB,
+dropout 10%). Severe conditions are unseen stress tests.
+
+```bash
+!git -C /kaggle/working/time-series-project pull origin codex/mdr-shm-kaggle
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_model_a_v3.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v3_quick \
+  --mode quick
+```
+
+V3 passed syntax and end-to-end smoke tests. Smoke metrics are intentionally not
+used for research conclusions.
