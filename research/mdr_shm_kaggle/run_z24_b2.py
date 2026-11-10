@@ -30,11 +30,11 @@ def find_manifest(root: Path) -> Path:
             columns = set(pd.read_csv(path, nrows=2).columns)
         except Exception:
             continue
-        if {"record_id", "role", "label"}.issubset(columns):
+        if {"record_id", "label"}.issubset(columns) and ("role" in columns or "split" in columns):
             candidates.append(path)
     if len(candidates) != 1:
         raise RuntimeError(
-            "Expected exactly one record manifest with record_id/role/label; "
+            "Expected exactly one record manifest with record_id/label and role or split; "
             f"found {candidates}"
         )
     return candidates[0]
