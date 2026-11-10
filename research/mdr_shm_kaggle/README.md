@@ -142,6 +142,10 @@ Run the quick gate first:
   --bootstrap-samples 300
 ```
 
+Quick mode uses one replicate for ordinary corruptions and three replicates for
+`targeted_0.30`, so the repaired targeted protocol is tested before the full
+run.
+
 If the quick run ends with `MODEL_A_V31_PASS`, run the full protocol:
 
 ```bash
