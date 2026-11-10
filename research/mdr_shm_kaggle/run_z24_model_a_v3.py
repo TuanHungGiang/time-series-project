@@ -351,6 +351,12 @@ def main() -> None:
             "replicate": int(replicate),
             **metric_dict(group.label.tolist(), group.score.tolist()),
             "acceptance_rate": float(group.accepted.mean()),
+            "healthy_acceptance_rate": float(
+                group.loc[group.label == 0, "accepted"].mean()
+            ),
+            "damage_acceptance_rate": float(
+                group.loc[group.label == 1, "accepted"].mean()
+            ),
         }
         if accepted.label.nunique() == 2:
             accepted_metrics = metric_dict(
