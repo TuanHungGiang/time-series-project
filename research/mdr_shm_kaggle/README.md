@@ -117,3 +117,43 @@ dropout 10%). Severe conditions are unseen stress tests.
 
 V3 passed syntax and end-to-end smoke tests. Smoke metrics are intentionally not
 used for research conclusions.
+
+
+## Model A v3.1: paper-ready selective evaluation
+
+V3.1 keeps the frozen B2 score and the healthy-only V3 reliability calibration.
+It changes the evaluation protocol in four places:
+
+- evidence-targeted dropout samples from the highest-evidence sensor pool, so
+  the three replicate IDs are distinct but remain targeted;
+- accepted cohorts that lose either class are explicitly marked invalid;
+- stratified bootstrap confidence intervals and class-conditional coverage are
+  reported;
+- balanced AURC and reliability-to-error AUROC are added.
+
+Run the quick gate first:
+
+```bash
+!git -C /kaggle/working/time-series-project pull origin codex/mdr-shm-kaggle
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_model_a_v31.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v31_quick \
+  --mode quick \
+  --bootstrap-samples 300
+```
+
+If the quick run ends with `MODEL_A_V31_PASS`, run the full protocol:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_model_a_v31.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v31_full \
+  --mode full \
+  --bootstrap-samples 1000
+```
+
+The new outputs are `bootstrap_ci.csv` and `risk_coverage.csv`, in addition to
+the V3 artifacts. An `accepted_status=invalid_missing_class` row is a fail-safe
+abstention result, not an accepted-subset performance improvement.
+
+
