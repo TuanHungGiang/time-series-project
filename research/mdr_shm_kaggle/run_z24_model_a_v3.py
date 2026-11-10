@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -258,7 +259,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/kaggle/working/model_a_v2_selective_b2"),
+        default=Path("/kaggle/working/model_a_v3_selective_b2"),
     )
     parser.add_argument("--mode", choices=("quick", "full"), default="quick")
     args = parser.parse_args()
@@ -270,10 +271,11 @@ def main() -> None:
         rows = frame[frame.excitation_resolved == excitation_name]
         model = fit_b2(rows)
         models[excitation_name] = model
-        reliability_thresholds[excitation_name] = calibrate_reliability(model, rows)
+        reliability_calibrations[excitation_name] = calibrate_reliability(model, rows)
         print(
             f"{excitation_name}: score_threshold={model.threshold:.6f} "
-            f"reliability_threshold={reliability_thresholds[excitation_name]:.6f}",
+            f"reliability_threshold="
+            f"{reliability_calibrations[excitation_name].threshold:.6f}",
             flush=True,
         )
 
