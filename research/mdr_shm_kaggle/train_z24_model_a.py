@@ -412,6 +412,7 @@ def corrupt_record(
     record: RecordFeatures,
     condition: str,
     replicate: int,
+    b2: B2Model,
 ) -> tuple[RecordFeatures, np.ndarray, np.ndarray]:
     signals = load_vertical(Path(record.path))
     sensors, samples = signals.shape
@@ -445,12 +446,10 @@ def corrupt_record(
         availability[rng.choice(sensors, drop_count, replace=False)] = False
     elif condition.startswith("targeted"):
         freq, psd = normalized_sensor_spectra(signals)
-        evidence = []
-        for sensor_psd in psd:
-            try:
-                evidence.append(float(np.max(sensor_psd)))
-            except Exception:
-                evidence.append(0.0)
+        evidence = [
+            b2.raw_score(b2_features(item, freq, b2.anchors))
+            for item in psd
+        ]
         drop_count = min(sensors - 1, int(round(sensors * rate)))
         availability[np.argsort(evidence)[-drop_count:]] = False
     elif condition != "clean":
@@ -604,7 +603,7 @@ def main() -> None:
                 repeats = 1 if condition == "clean" or args.mode == "quick" else 3
                 for replicate in range(repeats):
                     changed, availability, quality = corrupt_record(
-                        record, condition, replicate
+                        record, condition, replicate, b2
                     )
                     components, _ = raw_components(
                         model,
