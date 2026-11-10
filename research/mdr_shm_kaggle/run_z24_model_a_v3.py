@@ -142,11 +142,16 @@ def reliability_features(
     }
 
 
+RELIABILITY_WEIGHTS = np.asarray([1.0, 0.25, 0.50, 1.0, 1.0])
+
+
 def normalized_reliability(
     vector: np.ndarray, calibration: ReliabilityCalibration
 ) -> float:
-    z = (vector - calibration.center) / calibration.scale
-    raw = float(np.mean(np.maximum(z, 0.0)))
+    z = np.maximum((vector - calibration.center) / calibration.scale, 0.0)
+    raw = float(
+        np.sum(z * RELIABILITY_WEIGHTS) / RELIABILITY_WEIGHTS.sum()
+    )
     return raw / max(calibration.threshold, 1e-12)
 
 
@@ -229,9 +234,10 @@ def calibrate_reliability(
     scale = 1.4826 * np.median(np.abs(matrix - center), axis=0)
     floors = np.asarray([0.01, 0.02, 0.01, 0.02, 0.05])
     scale = np.maximum(scale, floors)
-    raw_scores = np.mean(
-        np.maximum((matrix - center) / scale, 0.0), axis=1
-    )
+    positive_z = np.maximum((matrix - center) / scale, 0.0)
+    raw_scores = np.sum(
+        positive_z * RELIABILITY_WEIGHTS[None, :], axis=1
+    ) / RELIABILITY_WEIGHTS.sum()
     # Maximum healthy-mild calibration score: no damage label is consumed.
     threshold = max(float(np.max(raw_scores)), 1e-6)
     return ReliabilityCalibration(center, scale, threshold)
