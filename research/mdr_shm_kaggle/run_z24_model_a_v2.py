@@ -31,7 +31,7 @@ def prepare_frame(root: Path) -> tuple[pd.DataFrame, Path]:
     frame["role"] = frame["role"].astype(str).str.lower().replace({"val": "calibration"})
     frame.loc[frame.label == 1, "role"] = "test"
     frame = frame[frame.role.isin(["train", "calibration", "test"])].copy()
-    if frame.loc[frame.role.isin(["train", "calibration"], "label")].ne(0).any():
+    if frame.loc[frame.role.isin(["train", "calibration"]), "label"].ne(0).any():
         raise RuntimeError("Damage leakage into train/calibration")
     dataset_root = manifest.parent.parent
     index = build_file_index(dataset_root)
