@@ -15,15 +15,19 @@ Upload only:
 - `dataset-metadata.json` and the dataset README if desired
 
 Do not upload `_excluded/`. Do not upload the original RAR archives after the
-split dataset has been uploaded.
+split dataset has been uploaded. The selected upload is about **3.27 GiB**:
+train 0.266 GiB, val 1.513 GiB, test 1.493 GiB, plus negligible metadata.
+Although half of the damaged files live under `val/damage`, the runner forces
+every `label=1` record into evaluation-only; damage is never used for fitting,
+model selection, or threshold calibration.
 
 The runner finds a CSV containing `record_id`, `role`, and `label`. Absolute
 Windows paths in the manifest are resolved by matching their file names inside
 `/kaggle/input`.
 
 Hell Bridge is a separate external-validation dataset. Upload
-`data_100Hz.h5` later as a second private Kaggle Dataset; it must not be mixed
-into Z24 training.
+`data_100Hz.h5` later as a second private Kaggle Dataset (2.344 GiB); it must
+not be mixed into Z24 training.
 
 ## Run on Kaggle
 
