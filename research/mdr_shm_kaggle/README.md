@@ -44,3 +44,34 @@ baseline runs on CPU.
 
 The script writes the frozen model, record-level clean scores, corruption
 scores, and summaries under `/kaggle/working/mdr_shm_b2`.
+
+
+## Model A v1: mask-aware healthy-only detector
+
+After B2 has been reproduced, update the branch and run the quick Model A gate:
+
+```bash
+!git -C /kaggle/working/time-series-project pull
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/train_z24_model_a.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v1_quick \
+  --mode quick
+```
+
+Quick mode evaluates clean data plus 30% contiguous missing time, 5 dB noise,
+30% random sensor dropout, and 30% B2-evidence-targeted sensor dropout. It uses
+one deterministic replicate for the initial gate.
+
+Only after the quick result is accepted should the full protocol be run:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/train_z24_model_a.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/model_a_v1_full \
+  --mode full
+```
+
+Model selection uses healthy calibration consistency only. All 252 damage
+records remain evaluation-only. Outputs include `metrics.csv`,
+`record_scores.csv`, `risk_coverage.json`, `training_history.csv`, and
+`model_a.pt`.
