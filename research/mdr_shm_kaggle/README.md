@@ -236,3 +236,54 @@ Generate the detector comparison tables and figures:
 ```
 
 
+## Final Z24 statistics and framework evidence
+
+Once both `z24_detector_baselines_full` and `model_a_v31_paper` are available
+in the same Kaggle session, run the paired record-level hierarchical bootstrap,
+separate training-seed from corruption-replicate variability, and merge the
+detector and matched-coverage reliability evidence:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/analyze_z24_final_statistics.py \
+  --detector-dir /kaggle/working/z24_detector_baselines_full \
+  --reliability-dir /kaggle/working/model_a_v31_paper \
+  --output-dir /kaggle/working/z24_final_statistics \
+  --bootstrap-samples 2000 \
+  --coverage 0.70
+```
+
+The bootstrap resamples healthy and damage record IDs separately and retains
+all corruption replicates for each sampled record. It therefore does not treat
+attack replicates or deep-model seeds as new bridge records.
+
+
+## HellBridge healthy-adapted external validation
+
+Upload `data_100Hz.h5` as a separate private Kaggle Dataset. The external
+protocol freezes the B2/OCSVM algorithm and hyperparameters but re-estimates a
+regime-specific healthy reference from HellBridge UDS recordings. Damage labels
+are evaluation-only. This is healthy-only domain adaptation, not zero-shot
+transfer of Z24 modal anchors.
+
+Quick gate using UDS and DS1:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_hellbridge_b2_external.py \
+  --h5 /kaggle/input/datasets/giangtunhng/hellbridge/data_100Hz.h5 \
+  --output-dir /kaggle/working/hellbridge_b2_quick \
+  --mode quick \
+  --bootstrap-samples 300
+```
+
+Full DS1-DS8 validation:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_hellbridge_b2_external.py \
+  --h5 /kaggle/input/datasets/giangtunhng/hellbridge/data_100Hz.h5 \
+  --output-dir /kaggle/working/hellbridge_b2_full \
+  --mode full \
+  --bootstrap-samples 2000
+!cd /kaggle/working && zip -qr hellbridge_b2_full.zip hellbridge_b2_full
+```
+
+
