@@ -165,3 +165,30 @@ with `accepted_low_class_support=True` as exploratory because fewer than five
 records remain in the minority class.
 
 
+## Paper tables, baselines, ablations, and figures
+
+After the V3.1 full run, reuse its record-level outputs; the model does not need
+to be run again. The analysis compares every rejection rule at exactly the same
+realized coverage and includes confidence-margin, coverage-only, quality-only,
+jackknife-only, and repeated random-rejection baselines.
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/analyze_z24_v31_paper.py \
+  --input-dir /kaggle/working/model_a_v31_full \
+  --output-dir /kaggle/working/model_a_v31_paper \
+  --random-repeats 200
+```
+
+The output directory contains five CSV tables and four publication-ready PNG
+figures. In particular, use `table4_proposed_vs_random.csv` to test whether the
+proposed reliability ranking beats chance at matched coverage, and
+`table5_matched_aurc.csv` to compare overall selective risk. The component
+ablation is in `table3_ablation.csv`; lower balanced AURC is better.
+
+Download everything from Kaggle as one archive:
+
+```bash
+!cd /kaggle/working && zip -qr model_a_v31_paper.zip model_a_v31_paper
+```
+
+
