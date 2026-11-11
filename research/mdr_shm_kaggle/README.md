@@ -192,3 +192,47 @@ Download everything from Kaggle as one archive:
 ```
 
 
+## Classical and deep detector baselines
+
+This experiment isolates detector quality from the selective-reliability
+experiment. Every detector is fitted on healthy train records only, calibrated
+on healthy calibration records only, and evaluated on the identical clean and
+corrupted test records. Deep inputs are record-level median log-spectra; sensor
+subset augmentation is applied only after the record split, so no window or
+record leakage is possible.
+
+Enable a Kaggle GPU and run the quick gate:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_detector_baselines.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/z24_detector_baselines_quick \
+  --mode quick \
+  --epochs 12 \
+  --seeds 0
+```
+
+The runner compares B2, PCA-SPE, one-class SVM, Isolation Forest, CNN
+autoencoder, masked/denoising CNN autoencoder, and Deep SVDD. After
+`DETECTOR_BASELINES_PASS`, run the paper protocol:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/run_z24_detector_baselines.py \
+  --input-root /kaggle/input/datasets/giangtunhng/z24-v2/kaggle_z24_split \
+  --output-dir /kaggle/working/z24_detector_baselines_full \
+  --mode full \
+  --epochs 60 \
+  --seeds 0,1,2
+```
+
+Generate the detector comparison tables and figures:
+
+```bash
+!python /kaggle/working/time-series-project/research/mdr_shm_kaggle/analyze_z24_detector_baselines.py \
+  --input-dir /kaggle/working/z24_detector_baselines_full \
+  --output-dir /kaggle/working/z24_detector_paper
+!cd /kaggle/working && zip -qr z24_detector_results.zip \
+  z24_detector_baselines_full z24_detector_paper
+```
+
+
