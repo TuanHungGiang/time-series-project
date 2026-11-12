@@ -82,18 +82,27 @@ def macro_condition_pair(frame: pd.DataFrame) -> tuple[dict, dict]:
     )
 
 
-def stratified_record_sample(frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
-    sampled_parts = []
+def record_clusters(frame: pd.DataFrame) -> dict[int, list[np.ndarray]]:
+    clusters: dict[int, list[np.ndarray]] = {}
     record_labels = frame[["record_id", "label"]].drop_duplicates()
     for label, group in record_labels.groupby("label"):
-        record_ids = group.record_id.to_numpy()
-        sampled = rng.choice(record_ids, size=len(record_ids), replace=True)
-        for draw, record_id in enumerate(sampled):
-            part = frame[frame.record_id == record_id].copy()
-            # Keep duplicate bootstrap draws as distinct record clusters.
-            part["bootstrap_record"] = f"{label}:{draw}:{record_id}"
-            sampled_parts.append(part)
-    return pd.concat(sampled_parts, ignore_index=True)
+        clusters[int(label)] = [
+            np.flatnonzero(frame.record_id.to_numpy() == record_id)
+            for record_id in group.record_id
+        ]
+    return clusters
+
+
+def stratified_record_sample(
+    frame: pd.DataFrame,
+    clusters: dict[int, list[np.ndarray]],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    indices = []
+    for values in clusters.values():
+        draws = rng.integers(0, len(values), size=len(values))
+        indices.extend(values[index] for index in draws)
+    return frame.iloc[np.concatenate(indices)].reset_index(drop=True)
 
 
 def paired_bootstrap(
@@ -108,6 +117,7 @@ def paired_bootstrap(
     ]
     rows = []
     for cohort_name, cohort in cohorts:
+        clusters = record_clusters(cohort)
         candidate_point, baseline_point = (
             macro_condition_pair(cohort)
             if cohort_name == "macro_conditions"
@@ -115,7 +125,7 @@ def paired_bootstrap(
         )
         draws = {metric: [] for metric in METRICS}
         for _ in range(samples):
-            sampled = stratified_record_sample(cohort, rng)
+            sampled = stratified_record_sample(cohort, clusters, rng)
             candidate, baseline = (
                 macro_condition_pair(sampled)
                 if cohort_name == "macro_conditions"
