@@ -188,6 +188,10 @@ def main() -> None:
                     frequency, psds = window_psds(modified, args.window_seconds)
                     values = [score_record(fold, frequency, psds) for fold in relevant_folds]
                     quality = signal_quality(modified)
+                    sensor_coverage = modified.shape[0] / signals.shape[0]
+                    time_coverage = 0.91 if condition == "missing_0.30" else 1.0
+                    quality["observed_fraction"] = float(sensor_coverage * time_coverage)
+                    quality["integrity_error"] += float(-5.0 * np.log(max(quality["observed_fraction"], 1e-6)))
                     rows.append({
                         **item, "dataset": "HellBridge", "condition": condition, "replicate": replicate,
                         "fold_scores": len(values),
