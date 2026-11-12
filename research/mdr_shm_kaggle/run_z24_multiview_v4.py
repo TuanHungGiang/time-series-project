@@ -155,6 +155,10 @@ def main() -> None:
                 views = prepare(modified, group["anchors"])
                 components = group["model"].components(views)
                 quality = signal_quality(modified)
+                sensor_coverage = modified.shape[0] / signal_cache[row.record_id].shape[0]
+                time_coverage = 0.91 if condition == "missing_0.30" else 1.0
+                quality["observed_fraction"] = float(sensor_coverage * time_coverage)
+                quality["integrity_error"] += float(-5.0 * np.log(max(quality["observed_fraction"], 1e-6)))
                 score = normalized_score(components["score_raw"], group["score_threshold"], group["score_calibration"])
                 domain_error = normalized_score(
                     components["domain_error"], group["domain_threshold"], group["domain_calibration"]
