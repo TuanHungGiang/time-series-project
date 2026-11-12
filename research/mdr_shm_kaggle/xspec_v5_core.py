@@ -11,12 +11,20 @@ FMIN, FMAX = 0.5, 30.0
 BANDS = ((0.5, 2.0), (2.0, 5.0), (5.0, 10.0), (10.0, 20.0), (20.0, 30.0))
 
 
-def cross_spectral_features(signals: np.ndarray, nperseg: int = 2048) -> np.ndarray:
+def _spatial_quantiles(values: np.ndarray, bins: int) -> np.ndarray:
+    """Map a variable sensor count to a fixed, order-statistic representation."""
+    grid = (np.arange(bins, dtype=float) + 0.5) / bins
+    return np.quantile(np.asarray(values, dtype=float), grid, method="linear")
+
+
+def cross_spectral_features(
+    signals: np.ndarray, nperseg: int = 2048, spatial_bins: int = 12
+) -> np.ndarray:
     """Sensor-resolved relative power and coherence features.
 
-    The representation is insensitive to common excitation amplitude. Sensor
-    order is retained within a bridge/regime; models are never transferred
-    between layouts.
+    The representation is insensitive to common excitation amplitude. Spatial
+    order statistics retain much more information than mean/IQR summaries while
+    producing a fixed dimension when Z24 setups contain different sensor counts.
     """
     values = np.asarray(signals, dtype=np.float64)
     if values.ndim != 2 or values.shape[0] < 8:
@@ -60,8 +68,8 @@ def cross_spectral_features(signals: np.ndarray, nperseg: int = 2048) -> np.ndar
         # Signed relative power preserves local information. Coherence is
         # logit-transformed to increase resolution near one.
         coherence_logit = np.log((node_coherence + 1e-4) / (1.0001 - node_coherence))
-        output.extend(relative_power.tolist())
-        output.extend(coherence_logit.tolist())
+        output.extend(_spatial_quantiles(relative_power, spatial_bins).tolist())
+        output.extend(_spatial_quantiles(coherence_logit, spatial_bins).tolist())
     return np.asarray(output, dtype=np.float64)
 
 
