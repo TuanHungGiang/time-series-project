@@ -20,11 +20,18 @@ def clean_scores(path: Path, method: str | None = None) -> pd.DataFrame:
         frame = frame[frame.method == method]
     if frame.record_id.duplicated().any():
         raise ValueError(f"Duplicate clean record IDs in {path}")
-    return frame[["record_id", "label", "score"]].copy()
+    if "prediction" in frame:
+        decision = frame["prediction"].astype(bool)
+    elif "alarm" in frame:
+        decision = frame["alarm"].astype(bool)
+    else:
+        decision = frame["score"].to_numpy(dtype=float) > 1.0
+    output = frame[["record_id", "label", "score"]].copy()
+    output["decision"] = np.asarray(decision, dtype=bool)
+    return output
 
 
-def operating_metrics(labels: np.ndarray, scores: np.ndarray) -> dict[str, float]:
-    prediction = scores > 1.0
+def operating_metrics(labels: np.ndarray, scores: np.ndarray, prediction: np.ndarray) -> dict[str, float]:
     return {
         "auroc": float(roc_auc_score(labels, scores)),
         "recall": float(recall_score(labels, prediction, zero_division=0)),
@@ -37,6 +44,8 @@ def paired_bootstrap(frame: pd.DataFrame, samples: int, seed: int) -> pd.DataFra
     labels = frame.label.to_numpy(dtype=int)
     candidate = frame.candidate.to_numpy(dtype=float)
     baseline = frame.baseline.to_numpy(dtype=float)
+    candidate_decision = frame.candidate_decision.to_numpy(dtype=bool)
+    baseline_decision = frame.baseline_decision.to_numpy(dtype=bool)
     healthy = np.flatnonzero(labels == 0)
     damage = np.flatnonzero(labels == 1)
     rng = np.random.default_rng(seed)
@@ -47,12 +56,12 @@ def paired_bootstrap(frame: pd.DataFrame, samples: int, seed: int) -> pd.DataFra
             return float(roc_auc_score(y, candidate[indices]) - roc_auc_score(y, baseline[indices]))
         if metric == "balanced_accuracy":
             return float(
-                balanced_accuracy_score(y, candidate[indices] > 1.0)
-                - balanced_accuracy_score(y, baseline[indices] > 1.0)
+                balanced_accuracy_score(y, candidate_decision[indices])
+                - balanced_accuracy_score(y, baseline_decision[indices])
             )
         return float(
-            recall_score(y, candidate[indices] > 1.0, zero_division=0)
-            - recall_score(y, baseline[indices] > 1.0, zero_division=0)
+            recall_score(y, candidate_decision[indices], zero_division=0)
+            - recall_score(y, baseline_decision[indices], zero_division=0)
         )
 
     rows = []
@@ -77,8 +86,12 @@ def paired_bootstrap(frame: pd.DataFrame, samples: int, seed: int) -> pd.DataFra
 
 
 def compare(dataset: str, candidate_path: Path, baseline_path: Path, baseline_method: str | None, samples: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    candidate = clean_scores(candidate_path).rename(columns={"score": "candidate", "label": "candidate_label"})
-    baseline = clean_scores(baseline_path, baseline_method).rename(columns={"score": "baseline"})
+    candidate = clean_scores(candidate_path).rename(columns={
+        "score": "candidate", "label": "candidate_label", "decision": "candidate_decision",
+    })
+    baseline = clean_scores(baseline_path, baseline_method).rename(columns={
+        "score": "baseline", "decision": "baseline_decision",
+    })
     matched = candidate.merge(baseline, on="record_id", how="inner", validate="one_to_one")
     if not np.array_equal(matched.candidate_label, matched.label):
         raise ValueError(f"Label mismatch in {dataset}")
@@ -86,7 +99,12 @@ def compare(dataset: str, candidate_path: Path, baseline_path: Path, baseline_me
     labels = matched.label.to_numpy(dtype=int)
     rows = []
     for model in ("baseline", "candidate"):
-        rows.append({"dataset": dataset, "model": model, "records": len(matched), **operating_metrics(labels, matched[model].to_numpy())})
+        rows.append({
+            "dataset": dataset, "model": model, "records": len(matched),
+            **operating_metrics(
+                labels, matched[model].to_numpy(), matched[f"{model}_decision"].to_numpy(dtype=bool)
+            ),
+        })
     bootstrap = paired_bootstrap(matched, samples, 20261112 + len(dataset))
     bootstrap.insert(0, "dataset", dataset)
     return pd.DataFrame(rows), bootstrap
