@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from scipy.signal import detrend, resample_poly, welch
+from sklearn.metrics import roc_auc_score
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -145,17 +146,28 @@ def robust_score_reference(scores: np.ndarray) -> tuple[float, float]:
     return center, scale
 
 
-def aggregate_record_scores(scores: np.ndarray, counts: list[int], reference: tuple[float, float]) -> list[float]:
+def aggregate_record_scores(
+    scores: np.ndarray,
+    counts: list[int],
+    reference: tuple[float, float],
+) -> tuple[list[float], list[float]]:
+    """Return upper-tail and two-sided record scores.
+
+    The healthy-only reference is fitted before this function is called.  The
+    two-sided score therefore detects either unusually large or unusually
+    small model errors without learning a direction from damage labels.
+    """
     values = np.log1p(np.maximum(np.asarray(scores, float), 0.0))
     values = (values - reference[0]) / reference[1]
-    output, start = [], 0
+    upper, two_sided, start = [], [], 0
     for count in counts:
         current = values[start:start + count]
-        output.append(float(np.median(current)))
+        upper.append(float(np.median(current)))
+        two_sided.append(float(np.median(np.abs(current))))
         start += count
     if start != len(values):
         raise RuntimeError("Window-score aggregation length mismatch")
-    return output
+    return upper, two_sided
 
 
 def group_file(run_dir: Path, setup: int, excitation: str) -> Path:
@@ -165,7 +177,7 @@ def group_file(run_dir: Path, setup: int, excitation: str) -> Path:
 def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
               labels: list[str], raw_length: int, stride: int,
               representation: str, downsample: int, frequency_bins: int, epochs: int,
-              batch_size: int, device, output: Path) -> None:
+              batch_size: int, score_tail: str, device, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     train = group[(group.split == "train") & (group.label == 0)].copy()
     targets = group[((group.split == "val") & (group.label == 0)) | (group.split == "test")].copy()
@@ -192,9 +204,12 @@ def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
         model_name, fit, internal, target_matrix, epochs, batch_size, device,
     )
     reference = robust_score_reference(internal_scores)
-    record_scores = aggregate_record_scores(target_scores, counts, reference)
+    upper_scores, two_sided_scores = aggregate_record_scores(target_scores, counts, reference)
     result = targets[["record_id", "split", "label", "state", "setup", "excitation"]].copy()
-    result["score"] = record_scores
+    result["score_upper"] = upper_scores
+    result["score_two_sided"] = two_sided_scores
+    result["score"] = result[f"score_{score_tail}"]
+    result["score_tail"] = score_tail
     result["stable_sensors"] = len(labels)
     result["windows"] = counts
     result["score_reference_center"] = reference[0]
@@ -222,6 +237,7 @@ def finish_run(model_name: str, seed: int, run_dir: Path, frame: pd.DataFrame,
     threshold = threshold_from_healthy(calibration.score.to_numpy(), specificity_target)
     metric = {
         "model": model_name, "seed": seed,
+        "score_tail": str(frame.score_tail.iloc[0]),
         **publication_metrics(test.label, test.score, threshold),
         "threshold": threshold,
         "calibration_specificity": float(np.mean(calibration.score < threshold)),
@@ -241,6 +257,20 @@ def refresh(output: Path) -> None:
     scores = pd.concat([pd.read_csv(path.parent / "scores.csv") for path in metric_paths], ignore_index=True)
     metrics.to_csv(output / "metrics.csv", index=False)
     scores.to_csv(output / "record_scores.csv", index=False)
+    diagnostic_rows = []
+    for (model, seed), group in scores.groupby(["model", "seed"], sort=False):
+        diagnostic_rows.append({
+            "model": model,
+            "seed": seed,
+            "signed_upper_auc": float(roc_auc_score(group.label, group.score_upper)),
+            "two_sided_auc": float(roc_auc_score(group.label, group.score_two_sided)),
+            "healthy_upper_median": float(group.loc[group.label == 0, "score_upper"].median()),
+            "damage_upper_median": float(group.loc[group.label == 1, "score_upper"].median()),
+            "healthy_two_sided_median": float(group.loc[group.label == 0, "score_two_sided"].median()),
+            "damage_two_sided_median": float(group.loc[group.label == 1, "score_two_sided"].median()),
+            "note": "descriptive locked-test diagnostic; never used for model or tail selection",
+        })
+    pd.DataFrame(diagnostic_rows).to_csv(output / "score_orientation_diagnostics.csv", index=False)
     aggregate = metrics.groupby("model", sort=False).agg(
         auc_mean=("auc", "mean"), auc_std=("auc", "std"),
         ap_mean=("ap", "mean"), ap_std=("ap", "std"),
@@ -273,6 +303,12 @@ def main() -> None:
     parser.add_argument("--frequency-bins", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=0.90)
+    parser.add_argument(
+        "--score-tail", choices=("upper", "two_sided"), default="upper",
+        help=("upper reproduces the conventional high-error detector; two_sided "
+              "uses absolute healthy-standardized deviation and never learns "
+              "the score direction from damage labels"),
+    )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True); (args.output_dir / "runs").mkdir(exist_ok=True)
     import torch
@@ -298,7 +334,12 @@ def main() -> None:
             args.raw_window // args.downsample
             if args.representation == "raw_temporal" else args.frequency_bins
         ),
-        "window_aggregation": "median standardized log1p anomaly score",
+        "score_tail": args.score_tail,
+        "window_aggregation": (
+            "median absolute healthy-standardized log1p anomaly score"
+            if args.score_tail == "two_sided"
+            else "median signed healthy-standardized log1p anomaly score"
+        ),
         "threshold": f"six healthy validation record scores at specificity target {args.specificity_target}",
         "point_adjustment": False, "seeds": args.seeds, "epochs": args.epochs,
         "stable_sensor_counts": {f"setup{key[0]:02d}_{key[1]}": len(value) for key, value in sensors.items()},
@@ -321,7 +362,7 @@ def main() -> None:
                 run_group(model_name, seed, group_index, group, labels, args.raw_window,
                           args.window_stride, args.representation, args.downsample,
                           args.frequency_bins, args.epochs,
-                          args.batch_size, device, path)
+                          args.batch_size, args.score_tail, device, path)
             completed = collect_run(run_dir, sensors)
             if completed is None:
                 raise RuntimeError(f"Incomplete groups for {model_name}/{seed}")
