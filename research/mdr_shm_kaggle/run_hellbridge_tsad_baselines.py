@@ -318,9 +318,13 @@ def score_torch(model: nn.Module, values: np.ndarray, batch_size: int, device: t
 
 def threshold_from_healthy(scores: np.ndarray, specificity: float) -> float:
     try:
-        return float(np.quantile(scores, specificity, method="higher"))
+        boundary = float(np.quantile(scores, specificity, method="higher"))
     except TypeError:
-        return float(np.quantile(scores, specificity, interpolation="higher"))
+        boundary = float(np.quantile(scores, specificity, interpolation="higher"))
+    # Prediction uses score >= threshold. Move one representable float above
+    # the selected healthy boundary so ties at the boundary remain healthy and
+    # the realized calibration specificity is at least the requested value.
+    return float(np.nextafter(boundary, np.inf))
 
 
 def evaluate(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
