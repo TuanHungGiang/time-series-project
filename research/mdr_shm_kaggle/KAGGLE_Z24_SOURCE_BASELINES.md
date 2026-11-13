@@ -81,9 +81,11 @@ Metrics are computed only after window scores are aggregated to one score per
 complete MAT record. Damage is the positive class. The locked test contains 6
 healthy and 126 unseen-damage records; validation damage is never used.
 
-The default input is a phase-invariant spectral tensor. Each 4096-sample raw
-window is transformed by Welch, restricted to 0.5--30 Hz, normalized by
-per-sensor spectral area, log-transformed, mean-centered, and interpolated to
-128 bins. Model inputs are therefore `[C_group, 128]`, where `C_group` is 15,
-16, or 17 stable physical sensors.
+The primary benchmark uses raw temporal input: non-overlapping 1024-sample
+windows are linearly detrended and anti-aliased/downsampled to 512 points.
+Model inputs are `[C_group, 512]`, where `C_group` is 15, 16, or 17 stable
+physical sensors. A spectral representation remains available only as a
+predeclared ablation via `--representation spectral --raw-window 4096
+--window-stride 2048 --frequency-bins 128`; do not select between the two from
+locked-test performance.
 
