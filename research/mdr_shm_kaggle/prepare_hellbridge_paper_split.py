@@ -149,7 +149,8 @@ def allocate(
             "state": record.state,
             "label": int(record.label),
             "regime": record.regime,
-            "repeat": int(record.repeat),
+            # Bracket access is required because Series.repeat is also a method.
+            "repeat": int(record["repeat"]),
             "window_index": int(window_index),
             "start": start,
             "stop": start + window,
