@@ -81,3 +81,9 @@ Metrics are computed only after window scores are aggregated to one score per
 complete MAT record. Damage is the positive class. The locked test contains 6
 healthy and 126 unseen-damage records; validation damage is never used.
 
+The default input is a phase-invariant spectral tensor. Each 4096-sample raw
+window is transformed by Welch, restricted to 0.5--30 Hz, normalized by
+per-sensor spectral area, log-transformed, mean-centered, and interpolated to
+128 bins. Model inputs are therefore `[C_group, 128]`, where `C_group` is 15,
+16, or 17 stable physical sensors.
+
