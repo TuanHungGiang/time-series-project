@@ -342,7 +342,9 @@ def run_one(name: str, fit: np.ndarray, calibration: np.ndarray, test: np.ndarra
     started = time.time()
     if name == "pca":
         flat = fit.reshape(len(fit), -1)
-        model = PCA(n_components=min(len(fit) - 1, flat.shape[1]), svd_solver="full").fit(flat)
+        # Retain 95% healthy variance; using n-1 components would nearly
+        # interpolate the small healthy fit cohort and weaken the SPE baseline.
+        model = PCA(n_components=0.95, svd_solver="full").fit(flat)
         def score(values):
             values = values.reshape(len(values), -1)
             restored = model.inverse_transform(model.transform(values))
