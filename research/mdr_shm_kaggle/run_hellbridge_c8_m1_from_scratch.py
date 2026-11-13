@@ -9,7 +9,7 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+from scipy.signal import detrend, find_peaks, welch
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.pipeline import make_pipeline
@@ -17,10 +17,36 @@ from sklearn.preprocessing import StandardScaler
 
 from run_hellbridge_c6_paper_ar5_msd import read_record_channels
 from run_hellbridge_c7_z24_m1_transfer import modal_from_components, modal_spectrum
-from run_z24_supervised_consistency_c1 import feature_from_signals as c1_feature
+from run_z24_shape_fusion_b1 import shape_feature
 
 
 METHODS = ("m1_al40", "m1_ag35", "m1_al_ag_early_fusion")
+
+
+def hellbridge_c1_feature(signals: np.ndarray) -> np.ndarray:
+    """C1 spectral-shape structure with Welch parameters valid for 1024 samples."""
+    values = detrend(np.asarray(signals, dtype=np.float64), axis=1, type="linear")
+    nperseg = min(4096, values.shape[1])
+    if nperseg < 256:
+        raise RuntimeError(f"C1 needs >=256 samples, got {values.shape[1]}")
+    noverlap = min(2048, nperseg // 2)
+    frequency, psd = welch(
+        values,
+        fs=100.0,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        axis=1,
+        detrend=False,
+        scaling="density",
+    )
+    keep = (frequency >= 0.5) & (frequency <= 30.0)
+    frequency, psd = frequency[keep], psd[:, keep]
+    total = np.trapezoid(psd, frequency, axis=1)
+    psd = psd / np.maximum(total[:, None], np.finfo(float).tiny)
+    availability = np.ones(psd.shape[0], dtype=bool)
+    # Preserve the Z24 C1 feature layout: 64 shape values plus excitation flag.
+    return np.concatenate([shape_feature(frequency, psd, availability), [0.0]])
 
 
 def blocked_split(manifest: pd.DataFrame) -> pd.DataFrame:
@@ -85,7 +111,7 @@ def extract_base(
                 start, stop = int(row.start), int(row.stop)
                 for group_name in ("al40", "ag35"):
                     signals = channels[group_name][:, start:stop]
-                    shapes[group_name][row.Index] = c1_feature(signals, "avt")
+                    shapes[group_name][row.Index] = hellbridge_c1_feature(signals)
                     current_frequency, current_spectrum = modal_spectrum(signals)
                     if frequency is None:
                         frequency = current_frequency
