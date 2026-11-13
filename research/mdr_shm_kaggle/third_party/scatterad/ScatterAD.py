@@ -112,7 +112,11 @@ class Scattering_Consistency_Fuse(nn.Module):
             time_inconsistency = F.mse_loss(h[1:], h[:-1], reduction='none').mean(dim=1)
             time_inconsistency = F.pad(time_inconsistency,  (0,1))
             dists = torch.cdist( h.unsqueeze(0), self.center.unsqueeze(0)).squeeze(0) 
-            Scatter_diviation = 1./torch.min(dists, dim=1)[0]
+            # The upstream expression used inverse distance, which assigns a
+            # larger anomaly score to points closer to the healthy center.
+            # Distance itself preserves the documented score direction:
+            # larger means more deviant from the healthy representation.
+            Scatter_diviation = torch.min(dists, dim=1)[0]
             return Scatter_diviation  + time_inconsistency
                 
 class Model(nn.Module):
