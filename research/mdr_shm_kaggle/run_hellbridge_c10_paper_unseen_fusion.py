@@ -27,7 +27,10 @@ METHODS = (
 
 
 def robust_reference(values: np.ndarray) -> tuple[float, float]:
-    values = np.asarray(values, float)
+    # AR/MSD and reconstruction scores are positive and strongly right-skewed.
+    # Log compression prevents a few healthy OOF outliers from forcing a
+    # saturated threshold while preserving score ordering.
+    values = np.log1p(np.maximum(np.asarray(values, float), 0.0))
     center = float(np.median(values))
     scale = float(max(
         1.4826 * np.median(np.abs(values - center)),
@@ -38,7 +41,10 @@ def robust_reference(values: np.ndarray) -> tuple[float, float]:
 
 
 def standardize(values: np.ndarray, reference: tuple[float, float]) -> np.ndarray:
-    return np.clip((np.asarray(values, float) - reference[0]) / reference[1], -12, 30)
+    values = np.log1p(np.maximum(np.asarray(values, float), 0.0))
+    # Do not upper-clip: the prior ceiling at 30 made the 90%-specificity
+    # threshold slightly greater than every possible test score.
+    return np.maximum((values - reference[0]) / reference[1], -20.0)
 
 
 def modal_matrix(
@@ -277,6 +283,10 @@ def main() -> None:
             "target_specificity": args.specificity_target,
             "realized_oof_specificity": realized,
             "oof_healthy_samples": len(values),
+            "oof_score_min": float(np.min(values)),
+            "oof_score_max": float(np.max(values)),
+            "oof_unique_scores": int(np.unique(values).size),
+            "threshold_above_oof_max": bool(threshold > np.max(values)),
         })
 
     test_manifest = manifest.loc[test].reset_index(drop=True)
@@ -351,6 +361,7 @@ def main() -> None:
         "primary_fusion": "equal average of robust standardized AR5-AL and AR5-AG scores",
         "healthy_calibration": "five blocked folds, each holding 8 windows per UDS repeat",
         "specificity_target": args.specificity_target,
+        "score_normalization": "log1p raw score followed by healthy median/MAD; no upper clipping",
         "paper_baselines": ["paper_ar5_al", "paper_ar5_ag"],
         "repeat_holdout_c9_status": "retained as strict domain-shift stress test",
         "test_labels_used_only_for_final_metrics": True,
