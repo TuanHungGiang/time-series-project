@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
-from scipy.signal import detrend, welch
+from scipy.signal import detrend, resample_poly, welch
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -91,13 +91,9 @@ def read_stable_vertical(path: Path, labels: list[str]) -> np.ndarray:
 
 
 def record_windows(signals: np.ndarray, raw_length: int, stride: int,
+                   representation: str, downsample: int,
                    frequency_bins: int) -> np.ndarray:
-    """Phase-invariant, sensor-aware spectral windows.
-
-    The prior raw-time smoke test produced AUC below 0.5 because arbitrary
-    phase/alignment dominated reconstruction error. Z24 SHM is evaluated here
-    on the same normalized spectral domain used by the proposed framework.
-    """
+    """Create raw-temporal primary inputs or spectral ablation inputs."""
     starts = list(range(0, signals.shape[1] - raw_length + 1, stride))
     if len(starts) < 16:
         raise RuntimeError(f"Too few complete windows: {signals.shape}")
@@ -106,6 +102,12 @@ def record_windows(signals: np.ndarray, raw_length: int, stride: int,
     for start in starts:
         values = signals[:, start:start + raw_length]
         values = detrend(values, axis=1, type="linear")
+        if representation == "raw_temporal":
+            # Anti-aliasing is part of scipy's polyphase resampler. No test or
+            # damage statistic is involved in this transformation.
+            feature = resample_poly(values, up=1, down=downsample, axis=1)
+            windows.append(feature.astype(np.float32))
+            continue
         frequency, psd = welch(
             values, fs=100.0, window="hann", nperseg=min(1024, raw_length),
             noverlap=min(512, raw_length // 2), axis=1, detrend=False,
@@ -162,7 +164,7 @@ def group_file(run_dir: Path, setup: int, excitation: str) -> Path:
 
 def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
               labels: list[str], raw_length: int, stride: int,
-              frequency_bins: int, epochs: int,
+              representation: str, downsample: int, frequency_bins: int, epochs: int,
               batch_size: int, device, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     train = group[(group.split == "train") & (group.label == 0)].copy()
@@ -170,12 +172,14 @@ def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
     if len(train) not in (1, 2):
         raise RuntimeError(f"Expected one or two healthy train records, got {len(train)}")
 
-    train_windows = [record_windows(read_stable_vertical(Path(row.path), labels), raw_length, stride, frequency_bins)
+    train_windows = [record_windows(read_stable_vertical(Path(row.path), labels), raw_length, stride,
+                                    representation, downsample, frequency_bins)
                      for row in train.itertuples()]
     fit, internal = split_training_windows(train_windows)
     target_windows, counts = [], []
     for row in targets.itertuples():
-        current = record_windows(read_stable_vertical(Path(row.path), labels), raw_length, stride, frequency_bins)
+        current = record_windows(read_stable_vertical(Path(row.path), labels), raw_length, stride,
+                                 representation, downsample, frequency_bins)
         target_windows.append(current); counts.append(len(current))
     target_matrix = np.concatenate(target_windows)
 
@@ -262,8 +266,10 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(range(20261113, 20261123)))
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--raw-window", type=int, default=4096)
-    parser.add_argument("--window-stride", type=int, default=2048)
+    parser.add_argument("--representation", choices=("raw_temporal", "spectral"), default="raw_temporal")
+    parser.add_argument("--raw-window", type=int, default=1024)
+    parser.add_argument("--window-stride", type=int, default=1024)
+    parser.add_argument("--downsample", type=int, default=2)
     parser.add_argument("--frequency-bins", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=0.90)
@@ -284,10 +290,14 @@ def main() -> None:
         "validation_damage_used": False, "test_used_for_selection": False,
         "conditioning": "18 independent setup x excitation models per method and seed",
         "sensor_selection": "physical-label intersection within each setup/excitation cell; metadata only",
-        "representation": "per-sensor normalized log-Welch spectral shape",
+        "representation": args.representation,
         "raw_window": args.raw_window, "stride": args.window_stride,
-        "frequency_range_hz": [0.5, 30.0],
-        "model_input_length": args.frequency_bins,
+        "downsample": args.downsample if args.representation == "raw_temporal" else None,
+        "frequency_range_hz": [0.5, 30.0] if args.representation == "spectral" else None,
+        "model_input_length": (
+            args.raw_window // args.downsample
+            if args.representation == "raw_temporal" else args.frequency_bins
+        ),
         "window_aggregation": "median standardized log1p anomaly score",
         "threshold": f"six healthy validation record scores at specificity target {args.specificity_target}",
         "point_adjustment": False, "seeds": args.seeds, "epochs": args.epochs,
@@ -309,7 +319,8 @@ def main() -> None:
                 print(f"\nmodel={model_name} seed={seed} cell={key} sensors={len(labels)}", flush=True)
                 group = used[(used.setup == key[0]) & (used.excitation == key[1])]
                 run_group(model_name, seed, group_index, group, labels, args.raw_window,
-                          args.window_stride, args.frequency_bins, args.epochs,
+                          args.window_stride, args.representation, args.downsample,
+                          args.frequency_bins, args.epochs,
                           args.batch_size, device, path)
             completed = collect_run(run_dir, sensors)
             if completed is None:
