@@ -81,10 +81,15 @@ runs are not repeated.
 import pandas as pd
 from IPython.display import Image, display
 
-display(pd.read_csv(OUT / "aggregate.csv").sort_values("auroc_mean", ascending=False))
+display(pd.read_csv(OUT / "aggregate.csv").sort_values("auc_mean", ascending=False))
 display(pd.read_csv(OUT / "metrics.csv"))
 display(Image(filename=str(OUT / "baseline_comparison.png")))
 archive = shutil.make_archive(str(OUT), "zip", root_dir=OUT)
 print("download:", archive)
 ```
+
+`metrics.csv` reports, for every model and seed: ROC-AUC (`auc`), average
+precision (`ap`), balanced accuracy (`ba`), recall, false-positive rate
+(`fpr = 1 - specificity`), precision, F1, and specificity. `aggregate.csv`
+reports mean and standard deviation over the completed seeds.
 
