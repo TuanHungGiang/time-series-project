@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.decomposition import PCA
+from sklearn.metrics import average_precision_score, f1_score, precision_score, roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -27,7 +28,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from run_hellbridge_tsad_baselines import (  # noqa: E402
-    Normalizer, development_split, evaluate, load_windows, seed_everything,
+    Normalizer, development_split, load_windows, seed_everything,
     threshold_from_healthy,
 )
 from third_party.lstm_ae import LSTMAE  # noqa: E402
@@ -52,6 +53,39 @@ SOURCE_KIND = {
     "moderntcn": "supplied official ModernTCN anomaly-detection source",
     "scatterad": "supplied ScatterAD source with center-shape compatibility patch",
 }
+
+
+def publication_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
+    """Record-window metrics with damage as the positive class.
+
+    AUC is ROC-AUC and AP is average precision (area under the step-wise
+    precision-recall curve). No point adjustment is applied.
+    """
+    labels = np.asarray(labels, dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    prediction = scores >= float(threshold)
+    healthy, damage = labels == 0, labels == 1
+    recall = float(prediction[damage].mean())
+    specificity = float((~prediction[healthy]).mean())
+    fpr = 1.0 - specificity
+    precision = float(precision_score(labels, prediction, zero_division=0))
+    f1 = float(f1_score(labels, prediction, zero_division=0))
+    auc = float(roc_auc_score(labels, scores))
+    ap = float(average_precision_score(labels, scores))
+    ba = 0.5 * (recall + specificity)
+    return {
+        "auc": auc,
+        "ap": ap,
+        "ba": ba,
+        "recall": recall,
+        "fpr": fpr,
+        "precision": precision,
+        "f1": f1,
+        "specificity": specificity,
+        # Backward-compatible aliases used by previous analysis notebooks.
+        "auroc": auc,
+        "balanced_accuracy": ba,
+    }
 
 
 class FitMinMax:
@@ -312,15 +346,17 @@ def refresh_outputs(output: Path, manifest: pd.DataFrame, test_index: np.ndarray
     metrics.to_csv(output / "metrics.csv", index=False)
     scores.to_csv(output / "record_scores.csv", index=False)
     aggregate = metrics.groupby("model", sort=False).agg(
-        auroc_mean=("auroc", "mean"), auroc_std=("auroc", "std"),
-        balanced_accuracy_mean=("balanced_accuracy", "mean"),
-        balanced_accuracy_std=("balanced_accuracy", "std"),
+        auc_mean=("auc", "mean"), auc_std=("auc", "std"),
+        ap_mean=("ap", "mean"), ap_std=("ap", "std"),
+        ba_mean=("ba", "mean"), ba_std=("ba", "std"),
         recall_mean=("recall", "mean"), recall_std=("recall", "std"),
+        fpr_mean=("fpr", "mean"), fpr_std=("fpr", "std"),
+        precision_mean=("precision", "mean"), precision_std=("precision", "std"),
         specificity_mean=("specificity", "mean"), specificity_std=("specificity", "std"),
         f1_mean=("f1", "mean"), f1_std=("f1", "std"), runs=("seed", "size"),
     ).reset_index()
     aggregate.to_csv(output / "aggregate.csv", index=False)
-    chart = aggregate.set_index("model")[["auroc_mean", "balanced_accuracy_mean", "recall_mean", "specificity_mean"]]
+    chart = aggregate.set_index("model")[["auc_mean", "ap_mean", "ba_mean", "recall_mean", "precision_mean"]]
     axis = chart.plot.bar(figsize=(14, 6), ylim=(0, 1.03), rot=35, grid=True)
     axis.set_title("HellBridge healthy-only source baselines (completed runs)")
     axis.figure.tight_layout()
@@ -386,7 +422,7 @@ def main() -> None:
             threshold = threshold_from_healthy(calibration_scores, args.specificity_target)
             metric = {
                 "model": model_name, "seed": seed,
-                **evaluate(labels, test_scores, threshold),
+                **publication_metrics(labels, test_scores, threshold),
                 "threshold": threshold,
                 "calibration_specificity": float(np.mean(calibration_scores < threshold)),
                 "seconds": time.time() - started,
