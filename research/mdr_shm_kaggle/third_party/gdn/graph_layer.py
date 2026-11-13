@@ -11,7 +11,10 @@ import math
 class GraphLayer(MessagePassing):
     def __init__(self, in_channels, out_channels, heads=1, concat=True,
                  negative_slope=0.2, dropout=0, bias=True, inter_dim=-1,**kwargs):
-        super(GraphLayer, self).__init__(aggr='add', **kwargs)
+        # Original PyG versions used node dimension 0 for the flattened
+        # [batch * nodes, features] tensor. Current MessagePassing defaults to
+        # -2, which inserts a singleton axis and breaks scatter aggregation.
+        super(GraphLayer, self).__init__(aggr='add', node_dim=0, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
