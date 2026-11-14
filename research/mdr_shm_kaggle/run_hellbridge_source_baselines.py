@@ -114,7 +114,9 @@ def moderntcn_config(channels: int, length: int) -> SimpleNamespace:
         dims=[64], dw_dims=[64], enc_in=channels, small_kernel_merged=False,
         dropout=0.1, head_dropout=0.0, use_multi_scale=False, revin=True,
         affine=True, subtract_last=False, freq="h", seq_len=length,
-        individual=False, pred_len=0, kernel_size=25, patch_size=8,
+        # target_window is an unused forecasting head for anomaly detection.
+        # Keep it non-zero to avoid constructing a zero-element Linear layer.
+        individual=False, pred_len=1, kernel_size=25, patch_size=8,
         patch_stride=4, decomposition=False,
     )
 
@@ -223,7 +225,9 @@ def fit_gdn(fit: np.ndarray, epochs: int, batch_size: int, device: torch.device)
     except ImportError as error:
         raise RuntimeError("GDN requires torch-geometric. Run the Kaggle install cell.") from error
     channels, length = fit.shape[1:]
-    history = 16
+    # The source benchmark used history=16.  Short descriptor sequences need
+    # at least one forecast step, so cap history at half their length.
+    history = min(16, max(2, length // 2))
     x = np.stack([fit[:, :, start:start + history] for start in range(length - history)], axis=2)
     y = np.stack([fit[:, :, start + history] for start in range(length - history)], axis=2)
     x, y = x.transpose(0, 2, 1, 3).reshape(-1, channels, history), y.transpose(0, 2, 1).reshape(-1, channels)
