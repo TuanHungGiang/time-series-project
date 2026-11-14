@@ -236,6 +236,7 @@ def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
     upper_scores, two_sided_scores = aggregate_record_scores(target_scores, counts, reference)
     result = targets[["record_id", "split", "label", "state", "setup", "excitation"]].copy()
     result["score_upper"] = upper_scores
+    result["score_lower"] = -np.asarray(upper_scores, dtype=float)
     result["score_two_sided"] = two_sided_scores
     result["score"] = result[
         "score_upper" if score_tail == "auto_validation" else f"score_{score_tail}"
@@ -272,7 +273,7 @@ def finish_run(model_name: str, seed: int, run_dir: Path, frame: pd.DataFrame,
         raise RuntimeError("Locked record counts changed")
     requested_tail = str(frame.score_tail.iloc[0])
     candidate_tails = (
-        ("upper", "two_sided")
+        ("upper", "lower", "two_sided")
         if requested_tail == "auto_validation"
         else (requested_tail,)
     )
@@ -334,6 +335,7 @@ def refresh(output: Path) -> None:
             "model": model,
             "seed": seed,
             "signed_upper_auc": float(roc_auc_score(group.label, group.score_upper)),
+            "signed_lower_auc": float(roc_auc_score(group.label, group.score_lower)),
             "two_sided_auc": float(roc_auc_score(group.label, group.score_two_sided)),
             "healthy_upper_median": float(group.loc[group.label == 0, "score_upper"].median()),
             "damage_upper_median": float(group.loc[group.label == 1, "score_upper"].median()),
@@ -375,11 +377,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=0.90)
     parser.add_argument(
-        "--score-tail", choices=("upper", "two_sided", "auto_validation"),
+        "--score-tail", choices=("upper", "lower", "two_sided", "auto_validation"),
         default="upper",
-        help=("upper is conventional high-error detection; two_sided uses "
-              "absolute healthy-standardized deviation; auto_validation "
-              "selects between them using validation only"),
+        help=("upper is conventional high-error detection; lower detects "
+              "unusually low reconstruction error; two_sided uses absolute "
+              "healthy-standardized deviation; auto_validation selects among "
+              "the three using validation only"),
     )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True); (args.output_dir / "runs").mkdir(exist_ok=True)
@@ -434,7 +437,7 @@ def main() -> None:
             if args.score_tail == "auto_validation" else "fixed before training"
         ),
         "window_aggregation": (
-            "validation-selected upper or two-sided healthy-standardized score"
+            "validation-selected upper, lower, or two-sided healthy-standardized score"
             if args.score_tail == "auto_validation"
             else "median absolute healthy-standardized log1p anomaly score"
             if args.score_tail == "two_sided"
