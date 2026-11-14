@@ -170,6 +170,35 @@ def aggregate_record_scores(
     return upper, two_sided
 
 
+def threshold_from_labeled_validation(
+    labels: np.ndarray,
+    scores: np.ndarray,
+) -> tuple[float, dict[str, float]]:
+    """Select a record threshold using validation only.
+
+    Balanced accuracy is primary; F1 and specificity are deterministic
+    tie-breakers. Test scores never enter this function.
+    """
+    labels = np.asarray(labels, dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    if set(np.unique(labels)) != {0, 1}:
+        raise RuntimeError("Validation must contain healthy and damage records")
+    unique = np.unique(scores)
+    epsilon = max(float(np.ptp(unique)), 1.0) * 1e-9
+    candidates = np.concatenate([
+        [unique[0] - epsilon],
+        (unique[:-1] + unique[1:]) / 2.0,
+        [unique[-1] + epsilon],
+    ])
+    best = None
+    for threshold in candidates:
+        metric = publication_metrics(labels, scores, float(threshold))
+        key = (metric["ba"], metric["f1"], metric["specificity"])
+        if best is None or key > best[0]:
+            best = (key, float(threshold), metric)
+    return best[1], best[2]
+
+
 def group_file(run_dir: Path, setup: int, excitation: str) -> Path:
     return run_dir / "groups" / f"setup{setup:02d}_{excitation}.csv"
 
@@ -180,7 +209,7 @@ def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
               batch_size: int, score_tail: str, device, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     train = group[(group.split == "train") & (group.label == 0)].copy()
-    targets = group[((group.split == "val") & (group.label == 0)) | (group.split == "test")].copy()
+    targets = group[group.split.isin(["val", "test"])].copy()
     if len(train) not in (1, 2):
         raise RuntimeError(f"Expected one or two healthy train records, got {len(train)}")
 
@@ -223,27 +252,48 @@ def collect_run(run_dir: Path, sensor_map: dict[tuple[int, str], list[str]]) -> 
     if not all(path.exists() for path in paths):
         return None
     frame = pd.concat([pd.read_csv(path) for path in paths], ignore_index=True)
-    if frame.record_id.duplicated().any() or len(frame) != 138:
-        raise RuntimeError(f"Expected 138 unique calibration/test records, got {len(frame)}")
+    if frame.record_id.duplicated().any() or len(frame) != 264:
+        raise RuntimeError(f"Expected 264 unique validation/test records, got {len(frame)}")
     return frame
 
 
 def finish_run(model_name: str, seed: int, run_dir: Path, frame: pd.DataFrame,
                specificity_target: float) -> None:
-    calibration = frame[(frame.split == "val") & (frame.label == 0)]
+    validation = frame[frame.split == "val"].copy()
     test = frame[frame.split == "test"].copy()
-    if len(calibration) != 6 or len(test) != 132:
+    if (
+        len(validation) != 132
+        or int((validation.label == 0).sum()) != 6
+        or int((validation.label == 1).sum()) != 126
+        or len(test) != 132
+    ):
         raise RuntimeError("Locked record counts changed")
-    threshold = threshold_from_healthy(calibration.score.to_numpy(), specificity_target)
+    threshold, validation_metric = threshold_from_labeled_validation(
+        validation.label.to_numpy(), validation.score.to_numpy()
+    )
     metric = {
         "model": model_name, "seed": seed,
         "score_tail": str(frame.score_tail.iloc[0]),
         **publication_metrics(test.label, test.score, threshold),
         "threshold": threshold,
-        "calibration_specificity": float(np.mean(calibration.score < threshold)),
+        **{
+            f"validation_{name}": value
+            for name, value in validation_metric.items()
+            if name in {
+                "auc", "ap", "ba", "recall", "fpr", "precision", "f1",
+                "specificity",
+            }
+        },
+        "validation_records": len(validation),
+        "validation_healthy_records": int((validation.label == 0).sum()),
+        "validation_damage_records": int((validation.label == 1).sum()),
         "records": len(test), "healthy_records": int((test.label == 0).sum()),
         "damage_records": int((test.label == 1).sum()),
     }
+    validation["model"] = model_name
+    validation["seed"] = seed
+    validation["threshold"] = threshold
+    validation.to_csv(run_dir / "validation_scores.csv", index=False)
     test["model"] = model_name; test["seed"] = seed; test["threshold"] = threshold
     test.to_csv(run_dir / "scores.csv", index=False)
     (run_dir / "metrics.json").write_text(json.dumps(metric, indent=2), encoding="utf-8")
@@ -315,17 +365,39 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     frame = load_manifest(args.input_root)
     sensors = stable_sensor_map(frame)
-    used = frame[(frame.split == "train") | ((frame.split == "val") & (frame.label == 0)) | (frame.split == "test")]
+    used = frame[frame.split.isin(["train", "val", "test"])].copy()
     print(f"device={device} cells={len(sensors)} models={args.models} seeds={args.seeds}", flush=True)
 
     protocol = {
-        "dataset": "Z24", "task": "healthy-only unseen-damage detection",
+        "dataset": "Z24",
+        "task": "one-class detector training with labeled validation selection",
         "split_unit": "complete MAT record", "train_healthy_records": 24,
-        "calibration_healthy_records": 6, "locked_test_healthy_records": 6,
+        "validation_healthy_records": 6, "validation_damage_records": 126,
+        "locked_test_healthy_records": 6,
         "locked_test_damage_records": 126,
-        "validation_damage_used": False, "test_used_for_selection": False,
+        "validation_damage_used_for_threshold_selection": True,
+        "validation_damage_used_for_model_fit_or_normalization": False,
+        "test_used_for_selection": False,
         "conditioning": "18 independent setup x excitation models per method and seed",
         "sensor_selection": "physical-label intersection within each setup/excitation cell; metadata only",
+        "raw_mat_shape": [65536, 27],
+        "selected_record_shape": "[C_cell, 65536], C_cell listed in stable_sensor_counts",
+        "canonical_window_pipeline": (
+            "[C_cell,1024] -> per-channel linear detrend -> polyphase "
+            "anti-aliased downsample by 2 -> train-only per-channel z-score"
+        ),
+        "canonical_model_input_shape": "[batch, C_cell, 512]",
+        "model_adapters": {
+            "pca_spe": "flatten to [batch, C_cell*512]",
+            "pca_pyod": "flatten to [batch, C_cell*512]",
+            "lstm_ae": "transpose to [batch, 512, C_cell]",
+            "usad": "flatten to [batch, C_cell*512]",
+            "gdn": "keep [batch, C_cell, 512]; sensors are nodes",
+            "tranad": "adapter uses temporal sequence with C_cell features",
+            "timesnet": "transpose to [batch, 512, C_cell]",
+            "moderntcn": "canonical channel-first tensor",
+            "scatterad": "canonical channel-first tensor",
+        },
         "representation": args.representation,
         "raw_window": args.raw_window, "stride": args.window_stride,
         "downsample": args.downsample if args.representation == "raw_temporal" else None,
@@ -340,10 +412,13 @@ def main() -> None:
             if args.score_tail == "two_sided"
             else "median signed healthy-standardized log1p anomaly score"
         ),
-        "threshold": f"six healthy validation record scores at specificity target {args.specificity_target}",
+        "threshold": (
+            "global labeled-validation record threshold maximizing balanced "
+            "accuracy; F1 then specificity tie-breakers"
+        ),
         "point_adjustment": False, "seeds": args.seeds, "epochs": args.epochs,
         "stable_sensor_counts": {f"setup{key[0]:02d}_{key[1]}": len(value) for key, value in sensors.items()},
-        "important_limitation": "Only six independent healthy calibration and six healthy test records.",
+        "important_limitation": "Only six independent healthy validation and six healthy test records.",
     }
     (args.output_dir / "protocol.json").write_text(json.dumps(protocol, indent=2), encoding="utf-8")
 
