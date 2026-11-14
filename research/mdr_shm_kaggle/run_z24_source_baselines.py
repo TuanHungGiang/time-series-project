@@ -448,13 +448,23 @@ def main() -> None:
             "accuracy; F1 then specificity tie-breakers"
         ),
         "point_adjustment": False, "seeds": args.seeds, "epochs": args.epochs,
+        "deterministic_model_runs": {
+            "pca_spe": 1 if "pca_spe" in args.models else 0,
+            "pca_pyod": 1 if "pca_pyod" in args.models else 0,
+        },
+        "stochastic_model_runs": len(args.seeds),
         "stable_sensor_counts": {f"setup{key[0]:02d}_{key[1]}": len(value) for key, value in sensors.items()},
         "important_limitation": "Only six independent healthy validation and six healthy test records.",
     }
     (args.output_dir / "protocol.json").write_text(json.dumps(protocol, indent=2), encoding="utf-8")
 
     for model_name in args.models:
-        for seed in args.seeds:
+        model_seeds = (
+            args.seeds[:1]
+            if model_name in {"pca_spe", "pca_pyod"}
+            else args.seeds
+        )
+        for seed in model_seeds:
             run_dir = args.output_dir / "runs" / f"{model_name}__{seed}"
             if (run_dir / "metrics.json").exists():
                 print(f"SKIP complete model={model_name} seed={seed}", flush=True); continue
