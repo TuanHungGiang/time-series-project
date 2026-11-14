@@ -237,7 +237,9 @@ def run_group(model_name: str, seed: int, group_index: int, group: pd.DataFrame,
     result = targets[["record_id", "split", "label", "state", "setup", "excitation"]].copy()
     result["score_upper"] = upper_scores
     result["score_two_sided"] = two_sided_scores
-    result["score"] = result[f"score_{score_tail}"]
+    result["score"] = result[
+        "score_upper" if score_tail == "auto_validation" else f"score_{score_tail}"
+    ]
     result["score_tail"] = score_tail
     result["stable_sensors"] = len(labels)
     result["windows"] = counts
@@ -268,12 +270,31 @@ def finish_run(model_name: str, seed: int, run_dir: Path, frame: pd.DataFrame,
         or len(test) != 132
     ):
         raise RuntimeError("Locked record counts changed")
-    threshold, validation_metric = threshold_from_labeled_validation(
-        validation.label.to_numpy(), validation.score.to_numpy()
+    requested_tail = str(frame.score_tail.iloc[0])
+    candidate_tails = (
+        ("upper", "two_sided")
+        if requested_tail == "auto_validation"
+        else (requested_tail,)
     )
+    selected = None
+    for tail in candidate_tails:
+        values = validation[f"score_{tail}"].to_numpy()
+        candidate_threshold, candidate_metric = threshold_from_labeled_validation(
+            validation.label.to_numpy(), values
+        )
+        key = (
+            candidate_metric["ba"], candidate_metric["auc"],
+            candidate_metric["f1"], candidate_metric["specificity"],
+        )
+        if selected is None or key > selected[0]:
+            selected = (key, tail, candidate_threshold, candidate_metric)
+    _, selected_tail, threshold, validation_metric = selected
+    validation["score"] = validation[f"score_{selected_tail}"]
+    test["score"] = test[f"score_{selected_tail}"]
     metric = {
         "model": model_name, "seed": seed,
-        "score_tail": str(frame.score_tail.iloc[0]),
+        "score_tail_requested": requested_tail,
+        "score_tail_selected": selected_tail,
         **publication_metrics(test.label, test.score, threshold),
         "threshold": threshold,
         **{
@@ -354,10 +375,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=0.90)
     parser.add_argument(
-        "--score-tail", choices=("upper", "two_sided"), default="upper",
-        help=("upper reproduces the conventional high-error detector; two_sided "
-              "uses absolute healthy-standardized deviation and never learns "
-              "the score direction from damage labels"),
+        "--score-tail", choices=("upper", "two_sided", "auto_validation"),
+        default="upper",
+        help=("upper is conventional high-error detection; two_sided uses "
+              "absolute healthy-standardized deviation; auto_validation "
+              "selects between them using validation only"),
     )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True); (args.output_dir / "runs").mkdir(exist_ok=True)
@@ -380,8 +402,8 @@ def main() -> None:
         "test_used_for_selection": False,
         "conditioning": "18 independent setup x excitation models per method and seed",
         "sensor_selection": "physical-label intersection within each setup/excitation cell; metadata only",
-        "raw_mat_shape": [65536, 27],
-        "selected_record_shape": "[C_cell, 65536], C_cell listed in stable_sensor_counts",
+        "raw_mat_shape": "[N_record, 27]; N_record varies slightly by acquisition",
+        "selected_record_shape": "[C_cell, N_record], C_cell listed in stable_sensor_counts",
         "canonical_window_pipeline": (
             "[C_cell,1024] -> per-channel linear detrend -> polyphase "
             "anti-aliased downsample by 2 -> train-only per-channel z-score"
@@ -407,8 +429,14 @@ def main() -> None:
             if args.representation == "raw_temporal" else args.frequency_bins
         ),
         "score_tail": args.score_tail,
+        "score_tail_selection": (
+            "validation BA, then validation AUC/F1/specificity tie-breakers"
+            if args.score_tail == "auto_validation" else "fixed before training"
+        ),
         "window_aggregation": (
-            "median absolute healthy-standardized log1p anomaly score"
+            "validation-selected upper or two-sided healthy-standardized score"
+            if args.score_tail == "auto_validation"
+            else "median absolute healthy-standardized log1p anomaly score"
             if args.score_tail == "two_sided"
             else "median signed healthy-standardized log1p anomaly score"
         ),
