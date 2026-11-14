@@ -140,6 +140,36 @@ def concatenate_records(
     return np.concatenate(arrays), [len(array) for array in arrays]
 
 
+def threshold_from_labeled_validation(
+    labels: np.ndarray,
+    scores: np.ndarray,
+) -> tuple[float, dict[str, float]]:
+    """Choose a record-level threshold on validation only.
+
+    Balanced accuracy is the primary objective. F1 and specificity are
+    deterministic tie breakers. Test labels and scores never enter this
+    selection.
+    """
+    labels = np.asarray(labels, dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    if set(np.unique(labels)) != {0, 1}:
+        raise RuntimeError("Labeled validation must contain healthy and damage")
+    unique = np.unique(scores)
+    epsilon = max(np.ptp(unique), 1.0) * 1e-9
+    candidates = np.concatenate([
+        [unique[0] - epsilon],
+        (unique[:-1] + unique[1:]) / 2.0,
+        [unique[-1] + epsilon],
+    ])
+    best = None
+    for threshold in candidates:
+        metric = publication_metrics(labels, scores, float(threshold))
+        key = (metric["ba"], metric["f1"], metric["specificity"])
+        if best is None or key > best[0]:
+            best = (key, float(threshold), metric)
+    return best[1], best[2]
+
+
 def select_reference_rows(rows: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Select two score-reference records per excitation without using damage."""
     fit_parts, reference_parts = [], []
@@ -273,9 +303,11 @@ def evaluate_run(
 
     calibration = records[records.evaluation_role == "calibration"].copy()
     test_records = records[records.evaluation_role == "evaluation"].copy()
+    healthy_calibration = calibration[calibration.label == 0]
     six_record_threshold = threshold_from_healthy(
-        calibration.score.to_numpy(), specificity_target
+        healthy_calibration.score.to_numpy(), specificity_target
     )
+    validation_metric = None
     if calibration_mode == "crossfit":
         development = pd.concat(
             [fit_rows, reference_rows, validation_rows], ignore_index=True
@@ -286,6 +318,15 @@ def evaluate_run(
         )
         threshold = threshold_from_healthy(
             calibration_frame.score.to_numpy(), specificity_target
+        )
+    elif calibration_mode == "labeled_val":
+        calibration_frame = calibration[
+            ["record_id", "split", "label", "state", "setup", "excitation", "score"]
+        ].copy()
+        calibration_frame["fold"] = -1
+        threshold, validation_metric = threshold_from_labeled_validation(
+            calibration_frame.label.to_numpy(),
+            calibration_frame.score.to_numpy(),
         )
     else:
         calibration_frame = calibration[
@@ -307,10 +348,17 @@ def evaluate_run(
         "calibration_score_records": len(calibration_frame),
         "fit_healthy_records": len(fit_rows),
         "reference_healthy_records": len(reference_rows),
-        "calibration_healthy_records": len(validation_rows),
+        "calibration_healthy_records": int((calibration.label == 0).sum()),
+        "calibration_damage_records": int((calibration.label == 1).sum()),
         "test_healthy_records": int((test_records.label == 0).sum()),
         "test_damage_records": int((test_records.label == 1).sum()),
     }
+    if validation_metric is not None:
+        metric.update({
+            f"validation_{name}": value
+            for name, value in validation_metric.items()
+            if name in {"auc", "ap", "ba", "recall", "fpr", "precision", "f1", "specificity"}
+        })
     test_records["threshold"] = threshold
     return metric, test_records, calibration_frame
 
@@ -370,7 +418,7 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--calibration-mode", choices=("six_val", "crossfit"),
+        "--calibration-mode", choices=("six_val", "crossfit", "labeled_val"),
         default="six_val",
     )
     parser.add_argument("--crossfit-folds", type=int, default=3)
@@ -386,7 +434,29 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     manifest = load_manifest(args.input_root)
     train = manifest[(manifest.split == "train") & (manifest.label == 0)].copy()
-    validation = manifest[(manifest.split == "val") & (manifest.label == 0)].copy()
+    if args.calibration_mode == "labeled_val":
+        if args.test_cohort != "locked_unseen":
+            raise RuntimeError(
+                "labeled_val requires locked_unseen: validation damage cannot "
+                "also be included in the evaluation cohort"
+            )
+        validation = manifest[manifest.split == "val"].copy()
+        expected_validation = {"healthy": 6, "damage": 126, "records": 132}
+    else:
+        validation = manifest[
+            (manifest.split == "val") & (manifest.label == 0)
+        ].copy()
+        expected_validation = {"healthy": 6, "damage": 0, "records": 6}
+    observed_validation = {
+        "healthy": int((validation.label == 0).sum()),
+        "damage": int((validation.label == 1).sum()),
+        "records": len(validation),
+    }
+    if observed_validation != expected_validation:
+        raise RuntimeError(
+            f"Unexpected validation cohort: expected {expected_validation}, "
+            f"got {observed_validation}"
+        )
     if args.test_cohort == "legacy_all_damage":
         test = manifest[
             (manifest.split == "test")
@@ -417,11 +487,20 @@ def main() -> None:
 
     protocol = {
         "dataset": "Z24",
-        "task": "native-signal healthy-only damage detection",
+        "task": (
+            "native-signal one-class training with labeled validation"
+            if args.calibration_mode == "labeled_val"
+            else "native-signal healthy-only damage detection"
+        ),
         "split_unit": "complete MAT record",
         "test_cohort": args.test_cohort,
         "evaluation_cohort_counts": observed_test,
+        "validation_cohort_counts": observed_validation,
         "val_damage_role": (
+            "threshold and model-selection validation only; excluded from fit, "
+            "normalization, score reference, and final test metrics"
+            if args.calibration_mode == "labeled_val"
+            else
             "evaluation only; excluded from fit, normalization, score reference, "
             "cross-fit calibration, and threshold"
             if args.test_cohort == "legacy_all_damage"
@@ -441,10 +520,15 @@ def main() -> None:
         "windows_per_record_max": int(max(map(len, cache.values()))),
         "fit_healthy_records": [str(value) for value in fit_rows.record_id],
         "score_reference_healthy_records": [str(value) for value in reference_rows.record_id],
-        "calibration_healthy_records": [str(value) for value in validation.record_id],
+        "calibration_healthy_records": [
+            str(value) for value in validation.loc[validation.label == 0, "record_id"]
+        ],
         "evaluation_healthy_records": int((test.label == 0).sum()),
         "evaluation_damage_records": int((test.label == 1).sum()),
-        "damage_values_or_labels_used_for_fit_normalization_reference_or_threshold": False,
+        "damage_values_or_labels_used_for_fit_normalization_or_reference": False,
+        "damage_labels_used_for_threshold_or_model_selection": (
+            args.calibration_mode == "labeled_val"
+        ),
         "score": "native upper-tail sequence score; median to complete-record score",
         "specificity_target": args.specificity_target,
         "calibration_mode": args.calibration_mode,
@@ -453,7 +537,7 @@ def main() -> None:
         "epochs": args.epochs,
         "neural_seeds": args.seeds,
         "pca_runs": 1,
-        "important_limitation": "Only six independent healthy calibration and six healthy test records.",
+        "important_limitation": "Only six independent healthy test records.",
     }
     (args.output_dir / "protocol.json").write_text(
         json.dumps(protocol, indent=2), encoding="utf-8"
