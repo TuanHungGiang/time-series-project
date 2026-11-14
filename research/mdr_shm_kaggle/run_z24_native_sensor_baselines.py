@@ -252,9 +252,18 @@ def evaluate_run(
         target_scores, counts, score_reference
     )
 
-    records = pd.concat([validation_rows, test_rows], ignore_index=True)[
-        ["record_id", "split", "label", "state", "setup", "excitation"]
-    ].copy()
+    record_columns = [
+        "record_id", "split", "label", "state", "setup", "excitation"
+    ]
+    calibration_records = validation_rows[record_columns].copy()
+    calibration_records["source_split"] = calibration_records["split"]
+    calibration_records["evaluation_role"] = "calibration"
+    evaluation_records = test_rows[record_columns].copy()
+    evaluation_records["source_split"] = evaluation_records["split"]
+    evaluation_records["evaluation_role"] = "evaluation"
+    records = pd.concat(
+        [calibration_records, evaluation_records], ignore_index=True
+    )
     records["score"] = upper_scores
     records["score_native_upper"] = upper_scores
     records["score_two_sided_diagnostic"] = two_sided_scores
@@ -262,8 +271,8 @@ def evaluate_run(
     records["model"] = model_name
     records["seed"] = seed
 
-    calibration = records[(records.split == "val") & (records.label == 0)]
-    test_records = records[records.split == "test"].copy()
+    calibration = records[records.evaluation_role == "calibration"].copy()
+    test_records = records[records.evaluation_role == "evaluation"].copy()
     six_record_threshold = threshold_from_healthy(
         calibration.score.to_numpy(), specificity_target
     )
@@ -351,6 +360,16 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=.90)
     parser.add_argument(
+        "--test-cohort",
+        choices=("locked_unseen", "legacy_all_damage"),
+        default="locked_unseen",
+        help=(
+            "locked_unseen evaluates 6 test healthy + 126 locked damage; "
+            "legacy_all_damage reproduces the earlier 6 healthy + 252 damage "
+            "evaluation by adding val-damage records only at evaluation time"
+        ),
+    )
+    parser.add_argument(
         "--calibration-mode", choices=("six_val", "crossfit"),
         default="six_val",
     )
@@ -368,7 +387,25 @@ def main() -> None:
     manifest = load_manifest(args.input_root)
     train = manifest[(manifest.split == "train") & (manifest.label == 0)].copy()
     validation = manifest[(manifest.split == "val") & (manifest.label == 0)].copy()
-    test = manifest[manifest.split == "test"].copy()
+    if args.test_cohort == "legacy_all_damage":
+        test = manifest[
+            (manifest.split == "test")
+            | ((manifest.split == "val") & (manifest.label == 1))
+        ].copy()
+        expected_test = {"healthy": 6, "damage": 252, "records": 258}
+    else:
+        test = manifest[manifest.split == "test"].copy()
+        expected_test = {"healthy": 6, "damage": 126, "records": 132}
+    observed_test = {
+        "healthy": int((test.label == 0).sum()),
+        "damage": int((test.label == 1).sum()),
+        "records": len(test),
+    }
+    if observed_test != expected_test:
+        raise RuntimeError(
+            f"Unexpected {args.test_cohort} evaluation cohort: "
+            f"expected {expected_test}, got {observed_test}"
+        )
     fit_rows, reference_rows = fixed_internal_split(train)
     needed = pd.concat([train, validation, test], ignore_index=True)
     schema = resolve_sensor_schema(needed, args.sensor_schema)
@@ -380,8 +417,16 @@ def main() -> None:
 
     protocol = {
         "dataset": "Z24",
-        "task": "native-signal healthy-only unseen-damage detection",
+        "task": "native-signal healthy-only damage detection",
         "split_unit": "complete MAT record",
+        "test_cohort": args.test_cohort,
+        "evaluation_cohort_counts": observed_test,
+        "val_damage_role": (
+            "evaluation only; excluded from fit, normalization, score reference, "
+            "cross-fit calibration, and threshold"
+            if args.test_cohort == "legacy_all_damage"
+            else "excluded from evaluation and all development operations"
+        ),
         "conditioning": "global pooled records with fixed-size native channel slots",
         "sensor_schema_source": "channel-availability metadata only; no damage values or labels",
         "sensor_schema": schema,
@@ -397,8 +442,8 @@ def main() -> None:
         "fit_healthy_records": [str(value) for value in fit_rows.record_id],
         "score_reference_healthy_records": [str(value) for value in reference_rows.record_id],
         "calibration_healthy_records": [str(value) for value in validation.record_id],
-        "locked_test_healthy_records": int((test.label == 0).sum()),
-        "locked_test_damage_records": int((test.label == 1).sum()),
+        "evaluation_healthy_records": int((test.label == 0).sum()),
+        "evaluation_damage_records": int((test.label == 1).sum()),
         "damage_values_or_labels_used_for_fit_normalization_reference_or_threshold": False,
         "score": "native upper-tail sequence score; median to complete-record score",
         "specificity_target": args.specificity_target,
