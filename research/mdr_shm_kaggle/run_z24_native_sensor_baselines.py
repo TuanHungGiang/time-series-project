@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.signal import detrend, resample_poly
+from sklearn.model_selection import StratifiedKFold
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -139,6 +140,83 @@ def concatenate_records(
     return np.concatenate(arrays), [len(array) for array in arrays]
 
 
+def select_reference_rows(rows: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Select two score-reference records per excitation without using damage."""
+    fit_parts, reference_parts = [], []
+    for _, group in rows.groupby("excitation", sort=True):
+        ordered = group.sort_values(["state", "setup", "record_id"]).reset_index(drop=True)
+        if len(ordered) < 6:
+            raise RuntimeError("Too few healthy rows for cross-fit reference split")
+        positions = sorted({len(ordered) // 3, (2 * len(ordered)) // 3})
+        reference_parts.append(ordered.iloc[positions])
+        fit_parts.append(ordered.drop(index=positions))
+    return (
+        pd.concat(fit_parts, ignore_index=True),
+        pd.concat(reference_parts, ignore_index=True),
+    )
+
+
+def crossfit_healthy_scores(
+    model_name: str,
+    seed: int,
+    development_rows: pd.DataFrame,
+    cache: dict[str, np.ndarray],
+    folds: int,
+    epochs: int,
+    batch_size: int,
+    device,
+) -> pd.DataFrame:
+    """Generate one out-of-fold standardized record score per healthy record."""
+    strata = (
+        development_rows.state.astype(str)
+        + "_"
+        + development_rows.excitation.astype(str)
+    )
+    splitter = StratifiedKFold(
+        n_splits=folds, shuffle=True, random_state=20261113
+    )
+    output = []
+    for fold, (fit_index, heldout_index) in enumerate(
+        splitter.split(development_rows, strata)
+    ):
+        available = development_rows.iloc[fit_index].copy().reset_index(drop=True)
+        heldout = development_rows.iloc[heldout_index].copy().reset_index(drop=True)
+        fold_fit, fold_reference = select_reference_rows(available)
+        fit, _ = concatenate_records(fold_fit, cache)
+        reference, _ = concatenate_records(fold_reference, cache)
+        target, counts = concatenate_records(heldout, cache)
+        normalizer = Normalizer.fit(fit)
+        fit = normalizer.transform(fit)
+        reference = normalizer.transform(reference)
+        target = normalizer.transform(target)
+        seed_everything(seed + 1009 * (fold + 1))
+        reference_scores, heldout_scores = run_model(
+            model_name, fit, reference, target, epochs, batch_size, device
+        )
+        score_reference = robust_score_reference(reference_scores)
+        upper, _ = aggregate_record_scores(
+            heldout_scores, counts, score_reference
+        )
+        current = heldout[
+            ["record_id", "split", "state", "setup", "excitation"]
+        ].copy()
+        current["fold"] = fold
+        current["score"] = upper
+        current["fit_records"] = len(fold_fit)
+        current["reference_records"] = len(fold_reference)
+        output.append(current)
+        print(
+            f"  crossfit fold={fold + 1}/{folds} model={model_name} "
+            f"fit={len(fold_fit)} reference={len(fold_reference)} "
+            f"heldout={len(heldout)}",
+            flush=True,
+        )
+    frame = pd.concat(output, ignore_index=True)
+    if len(frame) != len(development_rows) or frame.record_id.duplicated().any():
+        raise RuntimeError("Cross-fit calibration did not score each healthy record once")
+    return frame
+
+
 def evaluate_run(
     model_name: str,
     seed: int,
@@ -150,8 +228,10 @@ def evaluate_run(
     epochs: int,
     batch_size: int,
     specificity_target: float,
+    calibration_mode: str,
+    crossfit_folds: int,
     device,
-) -> tuple[dict, pd.DataFrame]:
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     fit, _ = concatenate_records(fit_rows, cache)
     reference, _ = concatenate_records(reference_rows, cache)
     validation, validation_counts = concatenate_records(validation_rows, cache)
@@ -184,16 +264,38 @@ def evaluate_run(
 
     calibration = records[(records.split == "val") & (records.label == 0)]
     test_records = records[records.split == "test"].copy()
-    threshold = threshold_from_healthy(
+    six_record_threshold = threshold_from_healthy(
         calibration.score.to_numpy(), specificity_target
     )
+    if calibration_mode == "crossfit":
+        development = pd.concat(
+            [fit_rows, reference_rows, validation_rows], ignore_index=True
+        )
+        calibration_frame = crossfit_healthy_scores(
+            model_name, seed, development, cache, crossfit_folds,
+            epochs, batch_size, device,
+        )
+        threshold = threshold_from_healthy(
+            calibration_frame.score.to_numpy(), specificity_target
+        )
+    else:
+        calibration_frame = calibration[
+            ["record_id", "split", "state", "setup", "excitation", "score"]
+        ].copy()
+        calibration_frame["fold"] = -1
+        threshold = six_record_threshold
     metric = {
         "model": model_name,
         "seed": seed,
         "score": "native upper-tail record-median",
+        "calibration_mode": calibration_mode,
         **publication_metrics(test_records.label, test_records.score, threshold),
         "threshold": threshold,
-        "calibration_specificity": float(np.mean(calibration.score < threshold)),
+        "six_record_threshold_diagnostic": six_record_threshold,
+        "calibration_specificity": float(
+            np.mean(calibration_frame.score < threshold)
+        ),
+        "calibration_score_records": len(calibration_frame),
         "fit_healthy_records": len(fit_rows),
         "reference_healthy_records": len(reference_rows),
         "calibration_healthy_records": len(validation_rows),
@@ -201,7 +303,7 @@ def evaluate_run(
         "test_damage_records": int((test_records.label == 1).sum()),
     }
     test_records["threshold"] = threshold
-    return metric, test_records
+    return metric, test_records, calibration_frame
 
 
 def refresh(output: Path) -> None:
@@ -249,6 +351,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=.90)
     parser.add_argument(
+        "--calibration-mode", choices=("six_val", "crossfit"),
+        default="six_val",
+    )
+    parser.add_argument("--crossfit-folds", type=int, default=3)
+    parser.add_argument(
         "--sensor-schema", choices=("auto", "local_rank", "intersection"),
         default="auto",
     )
@@ -273,7 +380,7 @@ def main() -> None:
 
     protocol = {
         "dataset": "Z24",
-        "task": "sensor-preserving healthy-only unseen-damage detection",
+        "task": "native-signal healthy-only unseen-damage detection",
         "split_unit": "complete MAT record",
         "conditioning": "global pooled records with fixed-size native channel slots",
         "sensor_schema_source": "channel-availability metadata only; no damage values or labels",
@@ -295,6 +402,9 @@ def main() -> None:
         "damage_values_or_labels_used_for_fit_normalization_reference_or_threshold": False,
         "score": "native upper-tail sequence score; median to complete-record score",
         "specificity_target": args.specificity_target,
+        "calibration_mode": args.calibration_mode,
+        "crossfit_folds": args.crossfit_folds if args.calibration_mode == "crossfit" else None,
+        "crossfit_development_healthy_records": 30 if args.calibration_mode == "crossfit" else None,
         "epochs": args.epochs,
         "neural_seeds": args.seeds,
         "pca_runs": 1,
@@ -315,13 +425,16 @@ def main() -> None:
                 continue
             print(f"\nmodel={model_name} seed={seed}", flush=True)
             started = time.time()
-            metric, scores = evaluate_run(
+            metric, scores, calibration_scores = evaluate_run(
                 model_name, seed, fit_rows, reference_rows, validation, test,
                 cache, args.epochs, args.batch_size, args.specificity_target,
-                device,
+                args.calibration_mode, args.crossfit_folds, device,
             )
             metric["seconds"] = time.time() - started
             scores.to_csv(run_dir / "scores.csv", index=False)
+            calibration_scores.to_csv(
+                run_dir / "calibration_scores.csv", index=False
+            )
             (run_dir / "metrics.json").write_text(
                 json.dumps(metric, indent=2), encoding="utf-8"
             )
