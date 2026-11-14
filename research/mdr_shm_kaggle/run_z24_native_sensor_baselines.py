@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-"""Sensor-preserving healthy-only baselines for the project Z24 protocol.
+"""Native-signal healthy-only baselines for the project Z24 protocol.
 
-All methods use the same complete-record split and the same globally common
-physical vertical sensors.  Input values and labels from damage records never
-influence fitting, normalization, score referencing, or threshold calibration.
-The global sensor schema uses availability metadata only.
+All methods use the same complete-record split.  Z24 moves sensors between
+setups and has no globally common physical channel label, so the default
+``auto`` schema falls back to a fixed number of setup-local sensor slots. Input
+values and labels from damage records never influence fitting, normalization,
+score referencing, or threshold calibration.  Channel availability metadata
+is used only to construct a fixed input shape.
 """
 
 import argparse
@@ -47,13 +49,43 @@ def sensor_number(label: str) -> int:
     return int(match.group()) if match else 10**9
 
 
-def common_sensor_labels(frame: pd.DataFrame) -> list[str]:
-    """Resolve a fixed physical schema from channel-availability metadata."""
-    sets = [set(parse_labels(value)) for value in frame.vertical_labels]
-    labels = sorted(set.intersection(*sets), key=lambda value: (sensor_number(value), value))
-    if len(labels) < 12:
-        raise RuntimeError(f"Only {len(labels)} globally common vertical sensors: {labels}")
-    return labels
+def sorted_labels(value: str) -> list[str]:
+    return sorted(
+        parse_labels(value), key=lambda label: (sensor_number(label), label)
+    )
+
+
+def resolve_sensor_schema(frame: pd.DataFrame, requested: str) -> dict:
+    """Resolve global physical labels or deterministic setup-local slots."""
+    label_lists = [sorted_labels(value) for value in frame.vertical_labels]
+    common = sorted(
+        set.intersection(*(set(labels) for labels in label_lists)),
+        key=lambda label: (sensor_number(label), label),
+    )
+    minimum_count = min(map(len, label_lists))
+    if requested == "intersection":
+        if len(common) < 12:
+            raise RuntimeError(
+                f"Intersection schema requested but only {len(common)} labels "
+                f"are common across layouts: {common}"
+            )
+        return {"mode": "global_physical_intersection", "labels": common,
+                "sensor_count": len(common)}
+    if requested == "auto" and len(common) >= 12:
+        return {"mode": "global_physical_intersection", "labels": common,
+                "sensor_count": len(common)}
+    if minimum_count < 12:
+        raise RuntimeError(f"Only {minimum_count} vertical sensor slots available")
+    return {
+        "mode": "setup_local_rank",
+        "labels": [],
+        "sensor_count": minimum_count,
+        "global_intersection_count": len(common),
+        "limitation": (
+            "Slot k is the kth numerically sorted vertical channel within each "
+            "setup; slots do not claim identical physical coordinates across setups."
+        ),
+    }
 
 
 def native_windows(
@@ -79,13 +111,17 @@ def native_windows(
 
 def record_cache(
     rows: pd.DataFrame,
-    labels: list[str],
+    schema: dict,
     raw_window: int,
     stride: int,
     downsample: int,
 ) -> dict[str, np.ndarray]:
     cache = {}
     for index, row in enumerate(rows.itertuples(), 1):
+        if schema["mode"] == "global_physical_intersection":
+            labels = schema["labels"]
+        else:
+            labels = sorted_labels(row.vertical_labels)[:schema["sensor_count"]]
         signals = read_stable_vertical(Path(row.path), labels)
         cache[str(row.record_id)] = native_windows(
             signals, raw_window, stride, downsample
@@ -212,6 +248,10 @@ def main() -> None:
     parser.add_argument("--downsample", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--specificity-target", type=float, default=.90)
+    parser.add_argument(
+        "--sensor-schema", choices=("auto", "local_rank", "intersection"),
+        default="auto",
+    )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "runs").mkdir(exist_ok=True)
@@ -224,9 +264,10 @@ def main() -> None:
     test = manifest[manifest.split == "test"].copy()
     fit_rows, reference_rows = fixed_internal_split(train)
     needed = pd.concat([train, validation, test], ignore_index=True)
-    labels = common_sensor_labels(needed)
+    schema = resolve_sensor_schema(needed, args.sensor_schema)
+    print(f"sensor_schema={json.dumps(schema)}", flush=True)
     cache = record_cache(
-        needed, labels, args.raw_window, args.window_stride, args.downsample
+        needed, schema, args.raw_window, args.window_stride, args.downsample
     )
     example = next(iter(cache.values()))
 
@@ -234,10 +275,11 @@ def main() -> None:
         "dataset": "Z24",
         "task": "sensor-preserving healthy-only unseen-damage detection",
         "split_unit": "complete MAT record",
-        "conditioning": "global pooled records with fixed physical sensor schema",
+        "conditioning": "global pooled records with fixed-size native channel slots",
         "sensor_schema_source": "channel-availability metadata only; no damage values or labels",
-        "common_sensor_labels": labels,
-        "common_sensor_count": len(labels),
+        "sensor_schema": schema,
+        "common_sensor_labels": schema["labels"],
+        "common_sensor_count": schema["sensor_count"],
         "preprocessing": "per-window linear detrend then polyphase anti-aliased downsampling",
         "raw_window": args.raw_window,
         "window_stride": args.window_stride,
