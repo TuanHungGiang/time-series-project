@@ -18,13 +18,17 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
+from sklearn.decomposition import PCA
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from run_hellbridge_source_baselines import (  # noqa: E402
-    MODELS, Normalizer, publication_metrics, run_model, seed_everything,
+    MODELS, FitMinMax, Normalizer, fit_gdn, fit_reconstructor, fit_scatterad,
+    fit_usad, publication_metrics, score_gdn, score_reconstructor,
+    score_scatterad, score_usad, seed_everything,
 )
 from run_z24_source_baselines import (  # noqa: E402
     aggregate_record_scores,
@@ -97,6 +101,57 @@ def group_path(run_dir: Path, setup: int, excitation: str) -> Path:
     return run_dir / "groups" / f"setup{setup:02d}_{excitation}.csv"
 
 
+def fit_scorer(
+    name: str,
+    fit: np.ndarray,
+    epochs: int,
+    batch_size: int,
+    device: torch.device,
+):
+    """Fit once and return a callable so conditions can be scored sequentially."""
+    if name == "pca_spe":
+        train = fit.reshape(len(fit), -1)
+        model = PCA(n_components=0.95, svd_solver="full").fit(train)
+
+        def score(values):
+            flat = values.reshape(len(values), -1)
+            reconstructed = model.inverse_transform(model.transform(flat))
+            return np.mean((flat - reconstructed) ** 2, axis=1)
+
+        return score
+    if name == "pca_pyod":
+        try:
+            from pyod.models.pca import PCA as PyODPCA
+        except ImportError as error:
+            raise RuntimeError("pca_pyod requires `pip install pyod`.") from error
+        model = PyODPCA(
+            n_components=None, n_selected_components=10,
+            contamination=0.1, random_state=0,
+        ).fit(fit.reshape(len(fit), -1))
+        return lambda values: model.decision_function(values.reshape(len(values), -1))
+    if name == "usad":
+        scale = FitMinMax(fit)
+        model = fit_usad(scale.transform(fit), epochs, batch_size, device)
+        return lambda values: score_usad(
+            model, scale.transform(values), batch_size, device
+        )
+    if name == "gdn":
+        model = fit_gdn(fit, epochs, batch_size, device)
+        return lambda values: score_gdn(model, values, batch_size, device)
+    if name == "scatterad":
+        model = fit_scatterad(fit, epochs, device)
+        return lambda values: score_scatterad(model, values, device)
+    scale = FitMinMax(fit) if name == "tranad" else None
+    training = scale.transform(fit) if scale is not None else fit
+    model = fit_reconstructor(name, training, epochs, batch_size, device)
+
+    def score(values):
+        transformed = scale.transform(values) if scale is not None else values
+        return score_reconstructor(name, model, transformed, batch_size, device)
+
+    return score
+
+
 def run_group(
     model_name: str,
     seed: int,
@@ -140,6 +195,13 @@ def run_group(
         )
         clean_cache[str(row.record_id)] = normalizer.transform(raw)
 
+    # Fit exactly once. Score validation and each corruption cohort separately
+    # so full mode never materializes all 49 cohorts in RAM simultaneously.
+    seed_everything(seed + 1009 * group_index)
+    scorer = fit_scorer(model_name, fit, epochs, batch_size, device)
+    internal_scores = scorer(internal)
+    reference = robust_score_reference(internal_scores)
+
     arrays, counts, metadata = [], [], []
     for row in validation.itertuples():
         current = clean_cache[str(row.record_id)]
@@ -150,7 +212,18 @@ def run_group(
             "state": row.state, "setup": row.setup, "excitation": row.excitation,
             "condition": "clean", "kind": "clean", "rate": 0.0, "replicate": 0,
         })
+    validation_values = np.concatenate(arrays)
+    validation_scores = scorer(validation_values)
+    upper, two_sided = aggregate_record_scores(validation_scores, counts, reference)
+    validation_frame = pd.DataFrame(metadata)
+    validation_frame["score_upper"] = upper
+    validation_frame["score_lower"] = -np.asarray(upper, dtype=float)
+    validation_frame["score_two_sided"] = two_sided
+    validation_frame["windows"] = counts
+
+    condition_frames = []
     for condition, kind, rate, replicate in scenario_rows:
+        arrays, counts, metadata = [], [], []
         for row in test.itertuples():
             current = corrupt(
                 clean_cache[str(row.record_id)], kind, rate, str(row.record_id),
@@ -164,19 +237,17 @@ def run_group(
                 "condition": condition, "kind": kind, "rate": rate,
                 "replicate": replicate,
             })
+        condition_values = np.concatenate(arrays)
+        condition_scores = scorer(condition_values)
+        upper, two_sided = aggregate_record_scores(condition_scores, counts, reference)
+        condition_frame = pd.DataFrame(metadata)
+        condition_frame["score_upper"] = upper
+        condition_frame["score_lower"] = -np.asarray(upper, dtype=float)
+        condition_frame["score_two_sided"] = two_sided
+        condition_frame["windows"] = counts
+        condition_frames.append(condition_frame)
 
-    target = np.concatenate(arrays)
-    seed_everything(seed + 1009 * group_index)
-    internal_scores, target_scores = run_model(
-        model_name, fit, internal, target, epochs, batch_size, device,
-    )
-    reference = robust_score_reference(internal_scores)
-    upper, two_sided = aggregate_record_scores(target_scores, counts, reference)
-    result = pd.DataFrame(metadata)
-    result["score_upper"] = upper
-    result["score_lower"] = -np.asarray(upper, dtype=float)
-    result["score_two_sided"] = two_sided
-    result["windows"] = counts
+    result = pd.concat([validation_frame, *condition_frames], ignore_index=True)
     result["stable_sensors"] = len(labels)
     result["model"] = model_name
     result["seed"] = seed
