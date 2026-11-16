@@ -265,15 +265,14 @@ def run_group(group, labels, seed, group_index, args, device, output):
         }
         for split, split_records in targets.groupby("split", sort=False):
             for condition, kind, rate, replicate in scenarios():
-                window_scores, record_counts, metadata = [], [], []
+                corrupted_arrays, record_counts, metadata = [], [], []
                 for row in split_records.itertuples():
                     record_id = str(row.record_id)
                     values = transformed_cache[record_id]
                     corrupted, available = sensor_corrupt(
                         values, kind, rate, record_id, replicate, importance,
                     )
-                    scores = score_model(model, corrupted, args.batch_size, device)
-                    window_scores.extend(scores)
+                    corrupted_arrays.append(corrupted)
                     record_counts.append(counts[record_id])
                     metadata.append({
                         "record_id": record_id, "split": split,
@@ -292,8 +291,13 @@ def run_group(group, labels, seed, group_index, args, device, output):
                         "clip_low": low, "clip_high": high,
                         "clip_total": total,
                     })
+                # One batched inference call per split/scenario avoids thousands
+                # of tiny GPU launches while preserving record boundaries.
+                window_scores = score_model(
+                    model, np.concatenate(corrupted_arrays), args.batch_size, device,
+                )
                 upper, two_sided = aggregate_record_scores(
-                    np.asarray(window_scores), record_counts, reference,
+                    window_scores, record_counts, reference,
                 )
                 current = pd.DataFrame(metadata)
                 current["variant"] = variant
