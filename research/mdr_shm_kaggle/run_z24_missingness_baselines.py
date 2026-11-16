@@ -377,6 +377,10 @@ def main() -> None:
     parser.add_argument("--raw-window", type=int, default=1024)
     parser.add_argument("--window-stride", type=int, default=1024)
     parser.add_argument("--downsample", type=int, default=2)
+    parser.add_argument(
+        "--compact-log", action="store_true",
+        help="Print condition means instead of every corruption replicate.",
+    )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "runs").mkdir(exist_ok=True)
@@ -434,7 +438,16 @@ def main() -> None:
                 json.dumps(info, indent=2), encoding="utf-8"
             )
             refresh(args.output_dir)
-            print(pd.read_csv(run_dir / "metrics.csv").to_string(index=False), flush=True)
+            run_metrics = pd.read_csv(run_dir / "metrics.csv")
+            if args.compact_log:
+                compact = run_metrics.groupby("condition", as_index=False).agg(
+                    auc=("auc", "mean"), ba=("ba", "mean"),
+                    recall=("recall", "mean"), fpr=("fpr", "mean"),
+                    delta_auc=("delta_auc", "mean"), replicates=("replicate", "size"),
+                )
+                print(compact.to_string(index=False), flush=True)
+            else:
+                print(run_metrics.to_string(index=False), flush=True)
     refresh(args.output_dir)
     print(pd.read_csv(args.output_dir / "summary.csv").to_string(index=False))
     print(f"Z24_MISSINGNESS_BASELINES_PASS output={args.output_dir}")
