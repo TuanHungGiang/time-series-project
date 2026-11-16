@@ -42,8 +42,10 @@ from run_z24_source_baselines import (  # noqa: E402
 )
 
 
-def stable_rng(record_id: str, condition: str, replicate: int) -> np.random.Generator:
-    token = f"z24-missing-v1|{record_id}|{condition}|{replicate}".encode()
+def stable_rng(record_id: str, kind: str, replicate: int) -> np.random.Generator:
+    # Deliberately exclude severity/rate: each replicate defines one latent
+    # corruption pattern and larger rates reveal a strict superset of it.
+    token = f"z24-missing-nested-v2|{record_id}|{kind}|{replicate}".encode()
     seed = int.from_bytes(hashlib.sha256(token).digest()[:8], "little")
     return np.random.default_rng(seed)
 
@@ -75,26 +77,49 @@ def corrupt(
     output = values.copy()
     if kind == "clean":
         return output
-    rng = stable_rng(record_id, condition, replicate)
+    rng = stable_rng(record_id, kind, replicate)
     windows, channels, length = output.shape
     if kind == "point":
+        # Reusing the same uniform field makes {u < .10} a strict subset of
+        # {u < .30}, which is itself a subset of {u < .50}.
         output[rng.random(output.shape) < rate] = 0.0
     elif kind == "block":
         block = max(1, int(round(rate * length)))
+        # Anchor every severity inside a common maximum 50% block so the
+        # missing interval grows from the same starting index.
+        maximum_block = max(block, int(round(0.50 * length)))
         for window in range(windows):
             for channel in range(channels):
-                start = int(rng.integers(0, length - block + 1))
+                start = int(rng.integers(0, length - maximum_block + 1))
                 output[window, channel, start:start + block] = 0.0
     elif kind in {"sensor", "targeted"}:
         count = min(channels - 1, max(1, int(round(rate * channels))))
         if kind == "sensor":
-            selected = rng.choice(channels, size=count, replace=False)
+            # A single permutation per record/replicate provides nested sensor
+            # sets when the requested prefix grows with severity.
+            selected = rng.permutation(channels)[:count]
         else:
             selected = np.argsort(sensor_importance)[-count:]
         output[:, selected, :] = 0.0
     else:
         raise ValueError(kind)
     return output
+
+
+def assert_nested_masks() -> None:
+    """Fail fast if 10% is not contained in 30%, or 30% in 50%."""
+    values = np.ones((3, 17, 128), dtype=np.float32)
+    importance = np.arange(17, dtype=float)
+    for kind in ("point", "block", "sensor", "targeted"):
+        missing_sets = []
+        for rate in (0.10, 0.30, 0.50):
+            corrupted = corrupt(
+                values, kind, rate, "nested-mask-audit-record",
+                f"{kind}_{rate:.2f}", 3, importance,
+            )
+            missing_sets.append(set(np.flatnonzero(corrupted == 0.0).tolist()))
+        if not (missing_sets[0] <= missing_sets[1] <= missing_sets[2]):
+            raise RuntimeError(f"Non-nested corruption masks for kind={kind}")
 
 
 def group_path(run_dir: Path, setup: int, excitation: str) -> Path:
@@ -361,13 +386,16 @@ def main() -> None:
     frame = load_manifest(args.input_root)
     sensor_map = stable_sensor_map(frame)
     scenario_rows = scenarios(args.mode)
+    assert_nested_masks()
     protocol = {
         "dataset": "Z24", "experiment": "missing-data baseline stress test",
+        "protocol_version": "nested-mask-v2",
         "fit": "clean healthy train only",
         "selection": "clean labeled validation only",
         "test_conditions": [list(value) for value in scenario_rows],
         "imputation": "zero after train-only channel z-score (healthy mean)",
-        "mask_identity": "SHA256(record_id, condition, replicate), shared by all models",
+        "mask_identity": "SHA256(record_id, corruption_kind, replicate), shared by all models and severities",
+        "nested_severity_masks": "10% subset 30% subset 50% (runtime asserted)",
         "targeted_sensor_rule": "highest mean-square amplitude on clean healthy train only",
         "threshold_recalibrated_under_corruption": False,
         "models": args.models, "seeds": args.seeds, "epochs": args.epochs,
