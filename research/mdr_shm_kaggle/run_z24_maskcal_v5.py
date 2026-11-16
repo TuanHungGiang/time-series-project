@@ -132,12 +132,19 @@ def fit_mask_calibrator(
     patterns = calibration_patterns(
         internal_normalized.shape[1], importance, seed, random_patterns,
     )
-    rows = []
-    for index, pattern in enumerate(patterns):
+    masked_batches = []
+    for pattern in patterns:
         masked = internal_normalized.copy()
         masked[:, pattern == 0, :] = 0.0
-        scaled = scaler.transform(masked).astype(np.float32)
-        score = score_compact(model, scaled, batch_size, device)
+        masked_batches.append(scaler.transform(masked).astype(np.float32))
+    scores = score_compact(
+        model, np.concatenate(masked_batches), batch_size, device,
+    )
+    windows_per_pattern = len(internal_normalized)
+    rows = []
+    for index, pattern in enumerate(patterns):
+        start = index * windows_per_pattern
+        score = scores[start:start + windows_per_pattern]
         log_score = np.log1p(np.maximum(score, 0.0))
         center = float(np.median(log_score))
         mad = 1.4826 * float(np.median(np.abs(log_score - center)))
