@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Final locked Z24 evidence package for MDR-SHM V16.
 
-Runs exactly ten seeds, reusing the frozen V16 branch map.  Produces:
+Runs exactly ten new confirmation seeds, reusing the frozen V16 branch map.
+None of these seeds belongs to the three-seed pilot used to lock the map.
+Produces:
 
 * seed-level and aggregate test metrics;
 * paired seed-bootstrap confidence intervals;
@@ -35,9 +37,10 @@ from run_hellbridge_source_baselines import publication_metrics  # noqa: E402
 
 
 DEFAULT_SEEDS = [
-    20261113, 20261129, 20261207, 20261219, 20270103,
-    20270117, 20270131, 20270213, 20270227, 20270313,
+    20261219, 20270103, 20270117, 20270131, 20270213,
+    20270227, 20270313, 20270329, 20270411, 20270427,
 ]
+PILOT_SEEDS = {20261113, 20261129, 20261207}
 DELTA_COLUMNS = [
     "delta_auc", "delta_ba", "delta_recall", "delta_fpr",
     "delta_partial_auc_fpr_0_20", "delta_matched_recall_fpr_1_over_6",
@@ -284,6 +287,12 @@ def main():
     seeds = list(dict.fromkeys(args.seeds))
     if len(seeds) != 10:
         raise ValueError(f"Exactly ten unique seeds are required, got {seeds}")
+    overlap = sorted(set(seeds) & PILOT_SEEDS)
+    if overlap:
+        raise ValueError(
+            "Final confirmation seeds must be independent of the pilot; "
+            f"remove {overlap}"
+        )
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     v16.select_policy = pilot.select_locked_policy
