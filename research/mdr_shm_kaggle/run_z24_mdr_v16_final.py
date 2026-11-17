@@ -148,7 +148,17 @@ def paired_tests(per_seed_effects: pd.DataFrame):
                 "p_value_two_sided": p_value,
                 "paired_seeds": len(values),
             })
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    # Family-wise error control across all condition/metric confirmations.
+    order = np.argsort(table.p_value_two_sided.to_numpy(dtype=float))
+    raw = table.p_value_two_sided.to_numpy(dtype=float)[order]
+    adjusted = np.minimum(
+        1.0,
+        np.maximum.accumulate((len(raw) - np.arange(len(raw))) * raw),
+    )
+    table["p_value_holm"] = np.nan
+    table.loc[table.index[order], "p_value_holm"] = adjusted
+    return table
 
 
 def evaluate_candidate(cohort, threshold):
