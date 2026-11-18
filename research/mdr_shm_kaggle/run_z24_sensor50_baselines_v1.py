@@ -339,6 +339,43 @@ def refresh(output: Path):
     )[list(METRICS)].mean()
     seed_summary.to_csv(output / "per_seed_summary.csv", index=False)
 
+    # Publication variability is computed across independent training seeds.
+    # For sensor_0.50, each seed is first averaged over its five masks; the 50
+    # seed-mask observations are not treated as 50 independent training runs.
+    aggregation = {}
+    for metric in METRICS:
+        aggregation[f"{metric}_mean"] = (metric, "mean")
+        aggregation[f"{metric}_seed_sd"] = (metric, "std")
+    aggregation["seeds"] = ("seed", "nunique")
+    seed_level = seed_summary.groupby(
+        ["model", "condition"], as_index=False,
+    ).agg(**aggregation)
+    seed_level.to_csv(
+        output / "seed_level_publication_summary.csv", index=False,
+    )
+
+    formatted = seed_level.copy()
+    for metric in METRICS:
+        mean_column = f"{metric}_mean"
+        sd_column = f"{metric}_seed_sd"
+        formatted[f"{metric}_mean_pm_seed_sd"] = [
+            (
+                f"{mean:.4f} +/- {sd:.4f}"
+                if np.isfinite(sd)
+                else f"{mean:.4f} (deterministic)"
+            )
+            for mean, sd in zip(
+                formatted[mean_column].to_numpy(dtype=float),
+                formatted[sd_column].to_numpy(dtype=float),
+            )
+        ]
+    formatted_columns = ["model", "condition", "seeds"] + [
+        f"{metric}_mean_pm_seed_sd" for metric in METRICS
+    ]
+    formatted[formatted_columns].to_csv(
+        output / "publication_table_mean_pm_sd.csv", index=False,
+    )
+
     sensor = summary[summary.condition == "sensor_0.50"].sort_values(
         "ba_mean", ascending=False,
     )
@@ -455,6 +492,16 @@ def main():
     summary = pd.read_csv(args.output_dir / "publication_summary.csv")
     print("\n=== Z24 SENSOR-50 BASELINE PUBLICATION SUMMARY ===")
     print(summary.to_string(index=False))
+    print("\n=== SEED-LEVEL MEAN +/- SD (FIVE MASKS AVERAGED WITHIN SEED) ===")
+    seed_level = pd.read_csv(
+        args.output_dir / "seed_level_publication_summary.csv"
+    )
+    print(seed_level.to_string(index=False))
+    print("\n=== FORMATTED PUBLICATION TABLE ===")
+    formatted = pd.read_csv(
+        args.output_dir / "publication_table_mean_pm_sd.csv"
+    )
+    print(formatted.to_string(index=False))
     print(f"Z24_SENSOR50_BASELINES_V1_PASS output={args.output_dir}")
 
 
