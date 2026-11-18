@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Publication baseline run for Z24 random 50% sensor loss.
+"""Publication baseline run for a Z24 random sensor-loss severity sweep.
 
 Every detector is fitted on clean healthy training windows.  All methods use
 the exact deterministic record-level random sensor masks used by CLMM-RS.
@@ -65,13 +65,21 @@ DEFAULT_SEEDS = (
     20271219,
     20280103,
 )
-SCENARIOS = (
-    ("clean", "clean", 0.0, 0),
-    *(("sensor_0.50", "sensor", 0.50, replicate) for replicate in range(5)),
-)
+SCENARIOS = ()
 METRICS = (
     "auc", "ap", "ba", "recall", "specificity", "fpr", "precision", "f1",
 )
+
+
+def make_scenarios(rates):
+    output = [("clean", "clean", 0.0, 0)]
+    for rate in rates:
+        condition = f"sensor_{rate:.2f}"
+        output.extend(
+            (condition, "sensor", float(rate), replicate)
+            for replicate in range(5)
+        )
+    return tuple(output)
 
 
 def group_path(run_dir: Path, setup: int, excitation: str) -> Path:
@@ -237,7 +245,8 @@ def finish_run(args, model_name, seed, run_dir, frame):
     validation = frame[frame.split == "val"].copy()
     test = frame[frame.split == "test"].copy()
     policy_rows, metric_rows, score_rows = [], [], []
-    for condition in ("clean", "sensor_0.50"):
+    conditions = list(dict.fromkeys(value[0] for value in SCENARIOS))
+    for condition in conditions:
         calibration = validation[validation.condition == condition].copy()
         threshold, validation_metric = threshold_under_fpr_cap(
             calibration.label.to_numpy(),
@@ -340,8 +349,8 @@ def refresh(output: Path):
     seed_summary.to_csv(output / "per_seed_summary.csv", index=False)
 
     # Publication variability is computed across independent training seeds.
-    # For sensor_0.50, each seed is first averaged over its five masks; the 50
-    # seed-mask observations are not treated as 50 independent training runs.
+    # At every sensor-loss rate, each seed is first averaged over its five
+    # masks; seed-mask observations are not independent training runs.
     aggregation = {}
     for metric in METRICS:
         aggregation[f"{metric}_mean"] = (metric, "mean")
@@ -376,22 +385,20 @@ def refresh(output: Path):
         output / "publication_table_mean_pm_sd.csv", index=False,
     )
 
-    sensor = summary[summary.condition == "sensor_0.50"].sort_values(
-        "ba_mean", ascending=False,
+    sensor = seed_level[seed_level.condition != "clean"].copy()
+    pivot = sensor.pivot(
+        index="condition", columns="model", values="ba_mean",
     )
-    axis = sensor.plot.bar(
-        x="model",
-        y=["auc_mean", "ba_mean", "recall_mean"],
-        figsize=(11, 5),
-        ylim=(0, 1.02),
-        rot=20,
-        grid=True,
+    axis = pivot.plot(
+        marker="o", figsize=(11, 5), ylim=(0, 1.02), grid=True,
     )
-    axis.set_ylabel("Record-level metric")
-    axis.set_title("Z24 random sensor-50% baseline comparison")
+    axis.set_ylabel("Seed-level mean balanced accuracy")
+    axis.set_xlabel("Random sensor-loss condition")
+    axis.set_title("Z24 degradation under nested random sensor loss")
     axis.figure.tight_layout()
     axis.figure.savefig(
-        output / "sensor50_baselines.png", dpi=220, bbox_inches="tight",
+        output / "random_sensor_sweep_baselines.png", dpi=220,
+        bbox_inches="tight",
     )
     plt.close(axis.figure)
 
@@ -408,12 +415,25 @@ def main():
     parser.add_argument("--window-stride", type=int, default=1024)
     parser.add_argument("--downsample", type=int, default=2)
     parser.add_argument("--fpr-cap", type=float, default=0.20)
+    parser.add_argument(
+        "--rates", nargs="+", type=float, default=[0.10, 0.20, 0.30],
+        help="Random sensor-loss rates; each rate uses five nested masks.",
+    )
     args = parser.parse_args()
 
     if len(args.seeds) != 10 or len(set(args.seeds)) != 10:
         raise ValueError("Exactly ten unique seeds are required")
     if not 0 <= args.fpr_cap < 1:
         raise ValueError("fpr-cap must be in [0, 1)")
+    if (
+        not args.rates
+        or any(not 0 < rate < 1 for rate in args.rates)
+        or len(set(args.rates)) != len(args.rates)
+    ):
+        raise ValueError("rates must be unique values strictly between 0 and 1")
+    args.rates = sorted(args.rates)
+    global SCENARIOS
+    SCENARIOS = make_scenarios(args.rates)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "runs").mkdir(exist_ok=True)
     missing.assert_nested_masks()
@@ -423,13 +443,14 @@ def main():
     used = manifest[manifest.split.isin(["train", "val", "test"])]
     protocol = {
         "dataset": "Z24",
-        "experiment": "canonical baselines under random 50% sensor loss",
+        "experiment": "canonical baselines under nested random sensor-loss sweep",
         "training": "clean healthy-only",
         "preprocessing": "canonical detrend, polyphase downsample, train-only channel z-score",
         "input": "[batch,C_cell,512]",
         "conditions": [list(value) for value in SCENARIOS],
         "mask_identity": "same run_z24_missingness_baselines.corrupt function used by CLMM-RS",
         "random_masks_per_seed": 5,
+        "random_sensor_loss_rates": args.rates,
         "fixed_tail": "lower",
         "threshold_calibration": "condition-matched labelled validation under FPR cap",
         "fpr_cap": args.fpr_cap,
@@ -490,7 +511,7 @@ def main():
 
     refresh(args.output_dir)
     summary = pd.read_csv(args.output_dir / "publication_summary.csv")
-    print("\n=== Z24 SENSOR-50 BASELINE PUBLICATION SUMMARY ===")
+    print("\n=== Z24 RANDOM SENSOR-LOSS BASELINE PUBLICATION SUMMARY ===")
     print(summary.to_string(index=False))
     print("\n=== SEED-LEVEL MEAN +/- SD (FIVE MASKS AVERAGED WITHIN SEED) ===")
     seed_level = pd.read_csv(
@@ -502,7 +523,7 @@ def main():
         args.output_dir / "publication_table_mean_pm_sd.csv"
     )
     print(formatted.to_string(index=False))
-    print(f"Z24_SENSOR50_BASELINES_V1_PASS output={args.output_dir}")
+    print(f"Z24_SENSOR_SWEEP_BASELINES_V1_PASS output={args.output_dir}")
 
 
 if __name__ == "__main__":
