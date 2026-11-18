@@ -108,6 +108,7 @@ def build_split(
                 replicate,
                 sensor_importance,
             )
+            observed = ~np.all(np.isclose(current, 0.0, atol=1e-8), axis=2)
             arrays.append(current)
             counts.append(len(current))
             rows.append({
@@ -121,7 +122,7 @@ def build_split(
                 "kind": kind,
                 "rate": rate,
                 "replicate": replicate,
-                "coverage": 1.0 if kind == "clean" else 0.5,
+                "coverage": float(observed.mean()),
                 "windows": len(current),
             })
         values = np.concatenate(arrays)
