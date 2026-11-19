@@ -22,9 +22,34 @@ from run_z24_source_baselines import (
 )
 
 
-METHODS = ("timesnet", "timesnet_anchored", "timesnet_observed", "clmm_fill", "clmm_cross_predict")
+METHODS = (
+    "timesnet", "timesnet_anchored", "timesnet_observed", "clmm_fill",
+    "clmm_cross_predict", "clmm_observed_attention", "clmm_time_frequency",
+)
 BATCH = 16
 PROBES = 4
+LOSS_RATES = (0.10, 0.30, 0.50)
+MASK_REPLICATES = 5
+SPECTRAL_WEIGHT = 0.20
+
+
+class ObservedAttentionAdapter(CrossSensorAdapter):
+    """Keep missing sensor queries, but exclude them from attention keys and values."""
+
+    def forward(self, values, available):
+        visible = available.bool()
+        positions = self.sensor_embedding.unsqueeze(0)
+        tokens = torch.where(visible.unsqueeze(-1), self.encoder(values), self.missing_token) + positions
+        return self.decoder(self.context(tokens, src_key_padding_mask=~visible))
+
+
+def test_masks(channels, orders):
+    if len(orders) != MASK_REPLICATES:
+        raise ValueError(f"Expected {MASK_REPLICATES} sensor orders")
+    yield "clean", 0, np.ones(channels, dtype=bool)
+    for rate in LOSS_RATES:
+        for replicate, order in enumerate(orders):
+            yield f"sensor_{rate:.2f}", replicate, sensor_mask(channels, rate, order)
 
 
 def probe_groups(available):
@@ -36,7 +61,7 @@ def make_training_masks(rng, count, channels):
     kept, probes = [], []
     for _ in range(count):
         order = rng.permutation(channels)
-        available = sensor_mask(channels, float(rng.choice([0.0, 0.10, 0.20, 0.30])), order)
+        available = sensor_mask(channels, float(rng.choice((0.0, *LOSS_RATES))), order)
         observed = order[available[order]]
         target = np.zeros(channels, dtype=bool)
         target[observed[int(rng.integers(PROBES))::PROBES]] = True
@@ -51,6 +76,11 @@ def complete(adapter, x, visible):
 
 def observed_mean(error, mask):
     return (error.mean(-1) * mask).sum(1) / mask.sum(1)
+
+
+def log_spectral_power(signal):
+    spectrum = torch.fft.rfft(signal, dim=-1, norm="ortho")[..., 1:]
+    return torch.log1p(spectrum.real.square() + spectrum.imag.square())
 
 
 @torch.no_grad()
@@ -75,10 +105,11 @@ def anchor_periods(model, fit):
     return anchors
 
 
-def fit_adapter(mode, model, train, device, seed, epochs):
+def fit_adapter(mode, model, train, device, seed, epochs, *, observed_attention=False, spectral_weight=0.0):
     seed_everything(seed)
     _, channels, length = train.shape
-    adapter = CrossSensorAdapter(channels, length, 64, 4).to(device)
+    adapter_type = ObservedAttentionAdapter if observed_attention else CrossSensorAdapter
+    adapter = adapter_type(channels, length, 64, 4).to(device)
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=5e-4, weight_decay=1e-5)
     rng = np.random.default_rng(seed)
     for epoch in range(1, epochs + 1):
@@ -98,13 +129,19 @@ def fit_adapter(mode, model, train, device, seed, epochs):
                 filled = complete(adapter, x, (available & ~probe).unsqueeze(-1))
                 prediction = model_forward("timesnet", model, filled)
                 loss = observed_mean(F.smooth_l1_loss(prediction, x, reduction="none"), probe).mean()
+                if spectral_weight:
+                    frequency_error = F.smooth_l1_loss(
+                        log_spectral_power(prediction), log_spectral_power(x), reduction="none",
+                    )
+                    loss = loss + spectral_weight * observed_mean(frequency_error, probe).mean()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(adapter.parameters(), 5.0)
             optimizer.step()
             losses.append(float(loss.detach()))
         if epoch == 1 or epoch % 5 == 0 or epoch == epochs:
-            print(f"  {mode=} epoch={epoch}/{epochs} loss={np.mean(losses):.6f}", flush=True)
+            print(f"  {mode=} {observed_attention=} {spectral_weight=} "
+                  f"epoch={epoch}/{epochs} loss={np.mean(losses):.6f}", flush=True)
     return adapter.eval().requires_grad_(False)
 
 
@@ -130,7 +167,13 @@ def fit_group(raw_fit, raw_reference, device, seed, epochs, adapter_epochs):
     anchors = anchor_periods(model, train)
     anchored_delta = batch_delta()
     fill = fit_adapter("fill", model, train, device, seed + 97, adapter_epochs)
-    cross = fit_adapter("cross", model, train, device, seed + 97, adapter_epochs)
+    cross_adapters = {
+        "clmm_cross_predict": fit_adapter("cross", model, train, device, seed + 97, adapter_epochs),
+        "clmm_observed_attention": fit_adapter("cross", model, train, device, seed + 97, adapter_epochs,
+                                              observed_attention=True),
+        "clmm_time_frequency": fit_adapter("cross", model, train, device, seed + 97, adapter_epochs,
+                                           observed_attention=True, spectral_weight=SPECTRAL_WEIGHT),
+    }
 
     @torch.no_grad()
     def score(raw, available):
@@ -151,14 +194,15 @@ def fit_group(raw_fit, raw_reference, device, seed, epochs, adapter_epochs):
             filled = complete(fill, x, visible.expand(len(x), -1, -1)) if not available.all() else x
             residual = (x - model_forward("timesnet", model, filled)).square()
             chunks["clmm_fill"].append(observed_mean(residual, mask).cpu().numpy())
-            probe_total = x.new_zeros(len(x))
-            for channels in probe_groups(available):
-                shown = visible.clone()
-                shown[:, channels, :] = False
-                input_values = complete(cross, x, shown.expand(len(x), -1, -1))
-                prediction = model_forward("timesnet", model, input_values)
-                probe_total += (prediction[:, channels] - x[:, channels]).square().mean(-1).sum(1)
-            chunks["clmm_cross_predict"].append((probe_total / int(available.sum())).cpu().numpy())
+            for method, adapter in cross_adapters.items():
+                probe_total = x.new_zeros(len(x))
+                for channels in probe_groups(available):
+                    shown = visible.clone()
+                    shown[:, channels, :] = False
+                    input_values = complete(adapter, x, shown.expand(len(x), -1, -1))
+                    prediction = model_forward("timesnet", model, input_values)
+                    probe_total += (prediction[:, channels] - x[:, channels]).square().mean(-1).sum(1)
+                chunks[method].append((probe_total / int(available.sum())).cpu().numpy())
         return {method: np.concatenate(values) for method, values in chunks.items()}
 
     full = np.ones(raw_fit.shape[1], dtype=bool)
@@ -200,8 +244,13 @@ def evaluate(dataset, rows, output):
                                 recall_at_fpr_05=recall_at_fpr(y, s, 0.05),
                                 fp=int(((s >= threshold) & (y == 0)).sum()),
                                 tp=int(((s >= threshold) & (y == 1)).sum())))
-    if len(results) != 6 * len(METHODS):
-        raise ValueError(f"Expected 6 conditions/masks per method on {dataset}")
+    expected_keys = {("clean", 0)} | {
+        (f"sensor_{rate:.2f}", rep) for rate in LOSS_RATES for rep in range(MASK_REPLICATES)
+    }
+    for method in METHODS:
+        actual_keys = {(row["condition"], row["replicate"]) for row in results if row["method"] == method}
+        if actual_keys != expected_keys:
+            raise ValueError(f"Unexpected condition/mask keys: {dataset}/{method}")
     return pd.DataFrame(results)
 
 
@@ -230,11 +279,12 @@ def main():
     rows = []
     score_rows(rows, predict(raw[cal], full), manifest.loc[cal, "sample_id"], manifest.loc[cal, "label"], "val", "clean", 0)
     rng = np.random.default_rng(20261119)
-    masks = [("clean", 0, full)] + [("sensor_0.30", r, sensor_mask(40, 0.30, rng.permutation(40))) for r in range(5)]
-    for condition, rep, available in masks:
+    orders = [rng.permutation(40) for _ in range(MASK_REPLICATES)]
+    for condition, rep, available in test_masks(40, orders):
         score_rows(rows, predict(raw[test], available), manifest.loc[test, "sample_id"], manifest.loc[test, "label"],
                    "test", condition, rep)
     hell = evaluate("HellBridge", rows, out)
+    hell.assign(seed=args.seed).to_csv(out / "HellBridge_metrics_per_mask.csv", index=False)
     del predict, raw
 
     manifest = load_manifest(args.z24_root)
@@ -256,8 +306,9 @@ def main():
             raw = load(row)
             masks = [("clean", 0, full)]
             if row.split == "test":
-                masks += [("sensor_0.30", r, sensor_mask(len(channels), 0.30,
-                           stable_rng(str(row.record_id), "sensor", r).permutation(len(channels)))) for r in range(5)]
+                orders = [stable_rng(str(row.record_id), "sensor", r).permutation(len(channels))
+                          for r in range(MASK_REPLICATES)]
+                masks = test_masks(len(channels), orders)
             for condition, rep, available in masks:
                 pooled = {name: [np.median(values)] for name, values in predict(raw, available).items()}
                 score_rows(rows, pooled, [row.record_id], [row.label], row.split, condition, rep)
@@ -270,6 +321,18 @@ def main():
     summary = result.groupby(["dataset", "condition", "method"], as_index=False)[fields].mean()
     summary.to_csv(out / "summary.csv", index=False)
     (out / "period_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    (out / "protocol.json").write_text(json.dumps({
+        "seed": args.seed, "timesnet_epochs": args.epochs, "adapter_epochs": args.adapter_epochs,
+        "methods": METHODS, "training_sensor_loss": [0.0, *LOSS_RATES],
+        "test_sensor_loss": [0.0, *LOSS_RATES], "mask_replicates": MASK_REPLICATES,
+        "probe_groups": PROBES, "fit": "healthy-only", "threshold": "clean healthy validation q90",
+        "observed_attention": "absent and intentionally hidden sensors excluded as keys/values; all queries preserved",
+        "spectral_loss": "SmoothL1 on non-DC log1p FFT power of probed sensors",
+        "spectral_loss_weight": SPECTRAL_WEIGHT, "score": "upper-tail time-domain prediction residual for all cross-prediction variants",
+        "mask_rule": "one permutation per replicate, reused across rates and methods",
+        "mask_unit": {"HellBridge": "shared across test windows", "Z24": "record"},
+        "evaluation_unit": {"HellBridge": "window", "Z24": "record median"},
+    }, indent=2), encoding="utf-8")
     print(summary.round(4).to_string(index=False))
     print("CLMM_TIMESNET_TWO_BRIDGES_PASS", flush=True)
 
