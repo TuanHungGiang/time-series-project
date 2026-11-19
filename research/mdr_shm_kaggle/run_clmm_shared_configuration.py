@@ -1,0 +1,269 @@
+"""One locked CLMM configuration for two bridge benchmarks."""
+
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import h5py
+import numpy as np
+import pandas as pd
+from scipy.signal import detrend
+from sklearn.decomposition import PCA
+import torch
+
+from run_clmm_multi_detector import recall_at_fpr, sensor_mask, train_adapter
+
+
+FS = 100.0
+LENGTH = 1024
+FREQUENCY_LIMIT = 30.0
+BINS = 128
+BATCH = 16
+RATE = 0.30
+SPECIFICITY = 0.90
+OBJECTIVES = ("pca_spe", "usad")
+FREQUENCIES = np.fft.rfftfreq(LENGTH, d=1 / FS)[1:]
+EDGES = np.searchsorted(FREQUENCIES, np.linspace(0, FREQUENCY_LIMIT, BINS + 1))
+TAPER = np.hanning(LENGTH).astype(np.float32)
+
+
+def spectral_features(windows):
+    """Same physical frequency bins and transform for both bridges."""
+    if windows.ndim != 3 or windows.shape[-1] != LENGTH:
+        raise ValueError("Expected [window, channel, 1024]")
+    windows = detrend(windows, axis=-1, type="linear")
+    fft = np.fft.rfft(windows * TAPER, axis=-1)[..., 1:]
+    log_power = np.log1p(np.abs(fft[..., :EDGES[-1]]) ** 2 / LENGTH)
+    sums = np.concatenate([
+        np.zeros((*log_power.shape[:-1], 1), dtype=log_power.dtype),
+        np.cumsum(log_power, axis=-1),
+    ], axis=-1)
+    pooled = np.diff(sums[..., EDGES], axis=-1) / np.diff(EDGES)
+    if not np.isfinite(pooled).all():
+        raise ValueError("Nonfinite common spectral features")
+    return pooled.astype(np.float32)
+
+
+def hell_features(h5_path, manifest, read_al40):
+    features = np.empty((len(manifest), 40, BINS), dtype=np.float32)
+    with h5py.File(h5_path, "r") as h5:
+        for record, rows in manifest.groupby("record_id", sort=False):
+            values = read_al40(h5[record])
+            windows = np.stack([values[:, int(r.start):int(r.stop)] for r in rows.itertuples()])
+            features[rows.index] = spectral_features(windows)
+    return features
+
+
+def fit_group(raw_fit, seed, device, hb, adapter_class):
+    scaler = hb.FitMinMax(raw_fit)
+    fit = scaler.transform(raw_fit)
+    median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
+    hb.seed_everything(seed)
+    source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
+    pca = PCA(n_components=0.95, svd_solver="full").fit(fit.reshape(len(fit), -1))
+    mean = torch.as_tensor(pca.mean_, dtype=torch.float32, device=device)
+    basis = torch.as_tensor(pca.components_, dtype=torch.float32, device=device)
+
+    def pca_spe(x):
+        centered = x.flatten(1) - mean
+        return (centered - (centered @ basis.T) @ basis).square().mean(1)
+
+    def usad_error(x):
+        flat = x.flatten(1)
+        first = source.decoder1(source.encoder(flat))
+        cycle = source.decoder2(source.encoder(first))
+        return (0.5 * (flat - first).square() + 0.5 * (flat - cycle).square()).mean(1)
+
+    detectors = {"pca_spe": pca_spe, "usad": usad_error}
+    adapter, _ = train_adapter(
+        adapter_class, fit, detectors, OBJECTIVES, seed + 97, 20, device, hb.seed_everything,
+    )
+
+    @torch.no_grad()
+    def score_raw(values):
+        scores = {name: [] for name in detectors}
+        for batch in values.split(BATCH):
+            for name, score in detectors.items():
+                scores[name].append(torch.log1p(score(batch)).cpu().numpy())
+        return {name: np.concatenate(parts).astype(float) for name, parts in scores.items()}
+
+    anchors = {}
+    for name, scores in score_raw(torch.as_tensor(fit, device=device)).items():
+        center = float(np.median(scores))
+        spread = max(1.4826 * np.median(np.abs(scores - center)), 0.25 * scores.std(), 1e-4)
+        anchors[name] = (center, spread)
+
+    @torch.no_grad()
+    def predict(raw, available):
+        x = torch.as_tensor(scaler.transform(raw), device=device)
+        mask = torch.as_tensor(available, device=device).view(1, -1, 1)
+        median_filled = torch.where(mask, x, median)
+        if available.all():
+            clmm_filled = x
+        else:
+            chunks = []
+            for batch in x.split(BATCH):
+                observed = mask.squeeze(-1).expand(len(batch), -1).to(batch.dtype)
+                residual = adapter((batch - median) * mask, observed)
+                candidate = (median + residual).clamp(0, 1)
+                chunks.append(torch.where(mask, batch, candidate))
+            clmm_filled = torch.cat(chunks)
+        outputs = {}
+        for variant, scores in (("median", score_raw(median_filled)),
+                                ("clmm", score_raw(clmm_filled))):
+            normalized = {
+                name: np.abs((score - anchors[name][0]) / anchors[name][1])
+                for name, score in scores.items()
+            }
+            outputs[f"pca_spe_{variant}"] = normalized["pca_spe"]
+            outputs[f"usad_{variant}"] = normalized["usad"]
+            outputs[f"ensemble_{variant}"] = 0.5 * (normalized["pca_spe"] + normalized["usad"])
+        return outputs
+
+    return predict
+
+
+def evaluate(dataset, rows, hb, seed, out):
+    scores = pd.DataFrame(rows)
+    keys = ["sample_id", "condition", "replicate", "method"]
+    if scores.duplicated(keys).any() or not np.isfinite(scores.score).all():
+        raise ValueError(f"{dataset}: duplicated or nonfinite scores")
+    scores.to_csv(out / f"{dataset}_scores.csv.gz", compression="gzip", index=False)
+    results = []
+    for method, frame in scores.groupby("method"):
+        calibration = frame.loc[
+            frame.split.eq("val") & frame.label.eq(0) & frame.condition.eq("clean"), "score"
+        ].to_numpy(dtype=float)
+        if len(calibration) != (20 if dataset == "HellBridge" else 6):
+            raise ValueError(f"{dataset}: unexpected healthy calibration size")
+        threshold = hb.threshold_from_healthy(calibration, SPECIFICITY)
+        for (condition, rep), test in frame[frame.split.eq("test")].groupby(["condition", "replicate"]):
+            labels = test.label.to_numpy(dtype=int)
+            values = test.score.to_numpy(dtype=float)
+            results.append({
+                "dataset": dataset, "seed": seed, "method": method,
+                "condition": condition, "replicate": rep, "threshold": threshold,
+                **hb.publication_metrics(labels, values, threshold),
+                "recall_at_fpr_05": recall_at_fpr(labels, values, 0.05),
+                "recall_at_fpr_10": recall_at_fpr(labels, values, 0.10),
+            })
+    metrics = pd.DataFrame(results)
+    if len(metrics) != 36:
+        raise ValueError(f"{dataset}: expected 6 methods x 6 scenarios")
+    metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
+    return metrics
+
+
+def append_scores(rows, results, ids, labels, role, condition, rep):
+    for method, scores in results.items():
+        rows.extend(
+            {"sample_id": uid, "label": int(label), "split": role, "method": method,
+             "condition": condition, "replicate": rep, "score": float(score)}
+            for uid, label, score in zip(ids, labels, scores, strict=True)
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hell-h5", required=True, type=Path)
+    parser.add_argument("--z24-root", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--seed", type=int, default=20270901)
+    args = parser.parse_args()
+    import run_hellbridge_source_baselines as hb
+    import run_z24_source_baselines as z24
+    from run_hellbridge_tsad_baselines import read_al40
+    from run_z24_care_usad_v18 import CrossSensorAdapter
+    from run_z24_missingness_baselines import stable_rng
+
+    out = args.output_dir
+    out.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Shared configuration: 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
+
+    split = out / "hellbridge_split"
+    prepare = Path(__file__).resolve().with_name("prepare_hellbridge_paper_split.py")
+    subprocess.run([
+        sys.executable, str(prepare), "--h5", str(args.hell_h5), "--output-dir", str(split),
+        "--profile", "svendsen2022", "--regime", "P2_NM_Z", "--seed", "20261113",
+        "--strict-paper-counts",
+    ], check=True)
+    manifest = pd.read_csv(split / "sample_manifest.csv").sort_values(
+        ["record_id", "start"]
+    ).reset_index(drop=True)
+    fit, cal, test = hb.development_split(manifest)
+    raw = hell_features(args.hell_h5, manifest, read_al40)
+    predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter)
+    rng = np.random.default_rng(20261119)
+    hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
+    rows = []
+    for indices, role in ((cal, "val"), (test, "test")):
+        ids = manifest.loc[indices, "sample_id"].to_numpy()
+        labels = manifest.loc[indices, "label"].to_numpy()
+        append_scores(rows, predictor(raw[indices], np.ones(40, dtype=bool)), ids, labels, role, "clean", 0)
+        if role == "test":
+            for rep, mask in enumerate(hell_masks, 1):
+                append_scores(rows, predictor(raw[indices], mask), ids, labels, role, "sensor_0.30", rep)
+    hell = evaluate("HellBridge", rows, hb, args.seed, out)
+    del predictor, raw, rows
+
+    manifest = z24.load_manifest(args.z24_root)
+    rows = []
+    for index, ((setup, excitation), channels) in enumerate(sorted(z24.stable_sensor_map(manifest).items())):
+        print(f"Z24 setup={setup} excitation={excitation}", flush=True)
+        group = manifest[(manifest.setup == setup) & (manifest.excitation == excitation)]
+
+        def load(row):
+            signal = z24.read_stable_vertical(Path(row.path), channels)
+            usable = signal.shape[-1] // LENGTH * LENGTH
+            if usable < LENGTH:
+                raise ValueError(f"No complete windows: {row.record_id}")
+            windows = signal[:, :usable].reshape(len(channels), -1, LENGTH).transpose(1, 0, 2)
+            return spectral_features(windows)
+
+        healthy = group[(group.split == "train") & group.label.eq(0)]
+        fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
+        predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter)
+        for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
+            features = load(row)
+            scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
+            if row.split == "test":
+                scenarios.extend(
+                    ("sensor_0.30", rep, sensor_mask(
+                        len(channels), RATE, stable_rng(str(row.record_id), "sensor", rep).permutation(len(channels))
+                    )) for rep in range(5)
+                )
+            for condition, rep, mask in scenarios:
+                record_scores = {name: [np.median(scores)] for name, scores in predictor(features, mask).items()}
+                append_scores(rows, record_scores, [row.record_id], [row.label], row.split, condition, rep)
+        del predictor
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    combined = pd.concat([hell, evaluate("Z24", rows, hb, args.seed, out)], ignore_index=True)
+    combined.to_csv(out / "metrics_per_mask.csv", index=False)
+    fields = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_at_fpr_05", "recall_at_fpr_10"]
+    groups = ["dataset", "condition", "method"]
+    summary = combined.groupby(groups)[fields].mean().reset_index()
+    summary.to_csv(out / "summary.csv", index=False)
+    pairs = combined.pivot(index=["dataset", "condition", "replicate"], columns="method", values=fields)
+    delta = pairs.xs("ensemble_clmm", axis=1, level="method") - pairs.xs("ensemble_median", axis=1, level="method")
+    delta.to_csv(out / "ensemble_delta_per_mask.csv")
+    delta.groupby(level=["dataset", "condition"]).mean().to_csv(out / "ensemble_delta_summary.csv")
+    (out / "protocol.json").write_text(json.dumps({
+        "seed": args.seed, "sampling_rate_hz": FS, "window_samples": LENGTH,
+        "frequency_limit_hz": FREQUENCY_LIMIT, "frequency_bins": BINS,
+        "fit": "healthy-only", "detectors": OBJECTIVES, "fusion_weights": [0.5, 0.5],
+        "score_direction": "two-sided for both detectors and bridges",
+        "threshold": "healthy-only clean, fixed across test masks",
+        "target_calibration_specificity": SPECIFICITY,
+        "evaluation_units": {"HellBridge": "window", "Z24": "record median"},
+    }, indent=2), encoding="utf-8")
+    print(summary[["dataset", "condition", "method", "auc", "ba", "recall", "fpr"]].round(4).to_string(index=False))
+    print("CLMM_SHARED_CONFIGURATION_PASS", flush=True)
+
+
+if __name__ == "__main__":
+    main()
