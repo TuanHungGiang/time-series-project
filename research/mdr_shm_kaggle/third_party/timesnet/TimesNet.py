@@ -24,6 +24,7 @@ class TimesBlock(nn.Module):
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.k = configs.top_k
+        self.period_bins = None
         # parameter-efficient design
         self.conv = nn.Sequential(
             Inception_Block_V1(configs.d_model, configs.d_ff,
@@ -35,7 +36,12 @@ class TimesBlock(nn.Module):
 
     def forward(self, x):
         B, T, N = x.size()
-        period_list, period_weight = FFT_for_Period(x, self.k)
+        if self.period_bins is None:
+            period_list, period_weight = FFT_for_Period(x, self.k)
+        else:
+            period_list = [T // frequency for frequency in self.period_bins]
+            amplitudes = torch.fft.rfft(x, dim=1).abs().mean(-1)
+            period_weight = amplitudes[:, list(self.period_bins)]
 
         res = []
         for i in range(self.k):
@@ -213,4 +219,3 @@ class Model(nn.Module):
             dec_out = self.classification(x_enc, x_mark_enc)
             return dec_out  # [B, N]
         return None
-
