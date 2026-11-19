@@ -96,18 +96,17 @@ A different evaluation question arises when a detector has already been fitted o
 % Record datasets, splits, preprocessing, baselines, metrics, seeds, hardware,
 % implementation details, and statistical protocol from experiment evidence.
 
-\section{Results and discussion}
-\label{sec:results-discussion}
-
-\subsection{Baseline performance under random sensor loss}
+\subsection{Baseline sensitivity to progressive sensor loss}
 \label{subsec:baseline-sensor-loss}
+
+The baseline evaluation used complete measurements and random sensor loss of 10\%, 20\%, and 30\% to characterize how detector performance changes as fewer channels remain available.
 
 On Z24, the mean record-level ROC-AUC decreased from complete observations through each successive sensor-loss level for all six baselines shown in Fig.~\ref{fig:z24-baseline-sensor-loss}. USAD maintained the highest mean ROC-AUC across the evaluated conditions, although its value declined from 0.9106 with complete observations to 0.7867 at 30\% sensor loss.
 
 \begin{figure}[pos=!htbp]
   \centering
   \includegraphics[width=0.88\linewidth]{figs/z24_baseline_roc_auc.pdf}
-  \caption{Record-level ROC-AUC of Z24 baselines from complete observations to 30\% random sensor loss. For neural baselines, five masks were averaged within each seed at each nonzero loss rate, and the plots show the mean and standard deviation across ten seeds. PCA-SPE used one deterministic fit. ScatterAD was unavailable for this Z24 sweep.}
+  \caption{Record-level ROC-AUC of Z24 baselines from complete observations to 30\% random sensor loss.}
   \label{fig:z24-baseline-sensor-loss}
 \end{figure}
 
@@ -116,12 +115,18 @@ On HellBridge, the mean window-level recall, balanced accuracy, and F1 score dec
 \begin{figure}[pos=!htbp]
   \centering
   \includegraphics[width=\linewidth]{figs/hellbridge_baseline_sensor_loss.pdf}
-  \caption{Window-level (a) recall, (b) balanced accuracy, and (c) F1 score on HellBridge under increasing random sensor loss. The threshold for each fitted model was calibrated on complete healthy measurements and held fixed across sensor-loss conditions. For neural baselines, error bars show the standard deviation across ten seeds after averaging five masks within each seed at each nonzero loss rate. PCA-SPE used one deterministic fit.}
+  \caption{Window-level (a) recall, (b) balanced accuracy, and (c) F1 score on HellBridge under increasing random sensor loss.}
   \label{fig:hellbridge-baseline-sensor-loss}
 \end{figure}
 
-% Flush the Results figures before the Conclusion and bibliography.
+% Keep the baseline figures with the preliminary evaluation.
 \clearpage
+
+\section{Results and discussion}
+\label{sec:results-discussion}
+
+% Report CLMM and its ablations against the baselines introduced in Section~\ref{subsec:baseline-sensor-loss}.
+
 \section{Conclusion}
 \label{sec:conclusion}
 
