@@ -16,11 +16,11 @@ from run_z24_missingness_baselines import fit_scorer
 from run_z24_sensor50_baselines_v1 import DEFAULT_MODELS, DEFAULT_SEEDS
 
 
-def scenarios(channels):
+def scenarios(channels, rates=(0.10, 0.30, 0.50)):
     rng = np.random.default_rng(20261119)
     orders = [rng.permutation(channels) for _ in range(5)]
     yield "clean", 0, np.array([], dtype=int)
-    for fraction in (0.10, 0.30, 0.50):
+    for fraction in rates:
         for replicate, order in enumerate(orders):
             yield f"sensor_{fraction:.2f}", replicate, order[:round(channels * fraction)]
 
@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--paper-figure", action="store_true",
+                        help="Use 10/20/30 percent sensor loss and one deterministic PCA fit")
     args = parser.parse_args()
     if len(args.seeds) != 10 or len(set(args.seeds)) != 10:
         parser.error("Exactly ten distinct seeds are required")
@@ -49,7 +51,8 @@ def main():
     fit, calibration, test = values[fit_index], values[cal_index], values[test_index]
     test_rows = manifest.loc[test_index, ["sample_id", "record_id", "state", "label"]].reset_index(drop=True)
     labels = test_rows.label.to_numpy()
-    cases = list(scenarios(test.shape[1]))
+    rates = (0.10, 0.20, 0.30) if args.paper_figure else (0.10, 0.30, 0.50)
+    cases = list(scenarios(test.shape[1], rates))
     if sum(labels == 0) != 80 or sum(labels == 1) != 640:
         raise ValueError("Expected 80 healthy and 640 damage test windows")
     (out / "protocol.json").write_text(json.dumps({
@@ -59,13 +62,16 @@ def main():
         "fit_healthy_windows": len(fit), "calibration_healthy_windows": len(calibration),
         "loss": "whole sensor channels set to normalized healthy mean (zero)",
         "threshold": "clean healthy validation q90, fixed for all conditions",
+        "paper_figure": args.paper_figure,
+        "pca_seed_policy": "one deterministic fit" if args.paper_figure else "repeat deterministic fit",
         "patterns": [{"condition": c, "replicate": r, "removed_1_based": (idx+1).tolist()}
                      for c, r, idx in cases],
     }, indent=2), encoding="utf-8")
 
     metric_files = []
     for model in args.models:
-        for seed in args.seeds:
+        model_seeds = args.seeds[:1] if args.paper_figure and model == "pca_spe" else args.seeds
+        for seed in model_seeds:
             run = out / "runs" / f"{model}__{seed}"
             run.mkdir(parents=True, exist_ok=True)
             metric_path = run / "metrics.csv"
