@@ -83,26 +83,26 @@ def fit_ppca(fit, device):
     total_variance = flat.var(axis=0, ddof=1).sum()
     noise = max((total_variance - pca.explained_variance_.sum()) / (flat.shape[1] - rank), 1e-6)
     loadings = pca.components_.T * np.sqrt(np.maximum(pca.explained_variance_ - noise, 0))
-    basis = torch.as_tensor(loadings, device=device)
-    mean = torch.as_tensor(pca.mean_, device=device)
-    identity = torch.eye(rank, dtype=basis.dtype, device=device)
+    mean = pca.mean_
+    identity = np.eye(rank, dtype=flat.dtype)
 
     @torch.no_grad()
     def infer(windows, available):
-        observed = torch.as_tensor(available, device=device).repeat_interleave(windows.shape[-1])
+        # Keep the small covariance solve on CPU so it does not depend on CUDA solver kernels.
+        observed = np.repeat(available, windows.shape[-1])
         if not observed.any():
             raise ValueError("PPCA requires at least one observed channel")
-        values = windows.flatten(1).to(basis.dtype)
-        observed_basis = basis[observed]
+        values = windows.flatten(1).cpu().numpy().astype(flat.dtype)
+        observed_basis = loadings[observed]
         delta = values[:, observed] - mean[observed]
         precision = observed_basis.T @ observed_basis + noise * identity
-        latent = torch.linalg.solve(precision, (delta @ observed_basis).T).T
+        latent = np.linalg.solve(precision, (delta @ observed_basis).T).T
         # Observed marginal Mahalanobis distance via the Woodbury identity.
         residual = delta - latent @ observed_basis.T
-        distance = (residual.square().sum(1) / noise + latent.square().sum(1)) / delta.shape[1]
-        filled = values.clone()
-        filled[:, ~observed] = (mean[~observed] + latent @ basis[~observed].T).clamp(0, 1)
-        return distance, filled.reshape_as(windows).to(windows.dtype)
+        distance = (np.square(residual).sum(1) / noise + np.square(latent).sum(1)) / delta.shape[1]
+        values[:, ~observed] = np.clip(mean[~observed] + latent @ loadings[~observed].T, 0, 1)
+        filled = torch.as_tensor(values.reshape(windows.shape), dtype=windows.dtype, device=device)
+        return distance, filled
 
     return infer
 
@@ -191,7 +191,7 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
         ppca = fit_ppca(fit, device)
         full = np.ones(fit.shape[1], dtype=bool)
         reference, _ = ppca(torch.as_tensor(fit, device=device), full)
-        reference = torch.log1p(reference).cpu().numpy()
+        reference = np.log1p(reference)
         ppca_center = np.median(reference)
         ppca_spread = max(1.4826 * np.median(np.abs(reference - ppca_center)),
                           0.25 * reference.std(), 1e-4)
@@ -226,7 +226,7 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
                 }
             if use_ppca:
                 distance, filled = ppca(x, available)
-                result["ppca_observed"] = (torch.log1p(distance).cpu().numpy() - ppca_center) / ppca_spread
+                result["ppca_observed"] = (np.log1p(distance) - ppca_center) / ppca_spread
                 result["ppca_usad_observed"] = (
                     clean.copy() if available.all() else score_all_and_observed(filled, available)[1]
                 )
@@ -450,6 +450,7 @@ def main():
         "observed_residual_ablation": args.observed_residual,
         "ppca": args.ppca,
         "ppca_rank_limit": 8 if args.ppca else None,
+        "ppca_solver": "NumPy CPU" if args.ppca else None,
         "threshold_sensitivity": "healthy clean median + Gaussian q90 times scaled MAD" if args.ppca else None,
         "observed_residual_rule": "mean weighted residual over observed channels, same clean reference",
         "score_direction": "upper-tail" if args.weighted_upper else "two-sided",
