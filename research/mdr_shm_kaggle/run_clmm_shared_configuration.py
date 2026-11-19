@@ -4,6 +4,7 @@ import argparse
 from functools import partial
 import json
 from pathlib import Path
+from statistics import NormalDist
 import subprocess
 import sys
 
@@ -72,8 +73,42 @@ def hell_features(h5_path, manifest, read_al40, transform=spectral_features):
     return features
 
 
+def fit_ppca(fit, device):
+    """Fit a low-rank healthy Gaussian and condition it on observed sensors."""
+    flat = fit.reshape(len(fit), -1).astype(np.float64)
+    if len(flat) < 2:
+        raise ValueError("PPCA requires at least two healthy fit windows")
+    rank = min(8, len(flat) - 1, flat.shape[1] - 1)
+    pca = PCA(n_components=rank, svd_solver="randomized", random_state=0).fit(flat)
+    total_variance = flat.var(axis=0, ddof=1).sum()
+    noise = max((total_variance - pca.explained_variance_.sum()) / (flat.shape[1] - rank), 1e-6)
+    loadings = pca.components_.T * np.sqrt(np.maximum(pca.explained_variance_ - noise, 0))
+    basis = torch.as_tensor(loadings, device=device)
+    mean = torch.as_tensor(pca.mean_, device=device)
+    identity = torch.eye(rank, dtype=basis.dtype, device=device)
+
+    @torch.no_grad()
+    def infer(windows, available):
+        observed = torch.as_tensor(available, device=device).repeat_interleave(windows.shape[-1])
+        if not observed.any():
+            raise ValueError("PPCA requires at least one observed channel")
+        values = windows.flatten(1).to(basis.dtype)
+        observed_basis = basis[observed]
+        delta = values[:, observed] - mean[observed]
+        precision = observed_basis.T @ observed_basis + noise * identity
+        latent = torch.linalg.solve(precision, (delta @ observed_basis).T).T
+        # Observed marginal Mahalanobis distance via the Woodbury identity.
+        residual = delta - latent @ observed_basis.T
+        distance = (residual.square().sum(1) / noise + latent.square().sum(1)) / delta.shape[1]
+        filled = values.clone()
+        filled[:, ~observed] = (mean[~observed] + latent @ basis[~observed].T).clamp(0, 1)
+        return distance, filled.reshape_as(windows).to(windows.dtype)
+
+    return infer
+
+
 def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
-              weighted_upper=False, observed_residual=False):
+              weighted_upper=False, observed_residual=False, use_ppca=False):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
@@ -152,6 +187,15 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
             observed.append(torch.log1p(errors.index_select(1, indices).mean((1, 2))).cpu().numpy())
         return orient(np.concatenate(full)), orient(np.concatenate(observed))
 
+    if use_ppca:
+        ppca = fit_ppca(fit, device)
+        full = np.ones(fit.shape[1], dtype=bool)
+        reference, _ = ppca(torch.as_tensor(fit, device=device), full)
+        reference = torch.log1p(reference).cpu().numpy()
+        ppca_center = np.median(reference)
+        ppca_spread = max(1.4826 * np.median(np.abs(reference - ppca_center)),
+                          0.25 * reference.std(), 1e-4)
+
     @torch.no_grad()
     def predict(raw, available):
         x = torch.as_tensor(scaler.transform(raw), device=device)
@@ -170,15 +214,23 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
         if observed_residual:
             if available.all():
                 clean = orient(score_raw(x))
-                return {name: clean.copy() for name in (
+                result = {name: clean.copy() for name in (
                     "median", "clmm", "median_observed", "clmm_observed",
                 )}
-            median_full, median_observed = score_all_and_observed(median_filled, available)
-            clmm_full, clmm_observed = score_all_and_observed(clmm_filled, available)
-            return {
-                "median": median_full, "clmm": clmm_full,
-                "median_observed": median_observed, "clmm_observed": clmm_observed,
-            }
+            else:
+                median_full, median_observed = score_all_and_observed(median_filled, available)
+                clmm_full, clmm_observed = score_all_and_observed(clmm_filled, available)
+                result = {
+                    "median": median_full, "clmm": clmm_full,
+                    "median_observed": median_observed, "clmm_observed": clmm_observed,
+                }
+            if use_ppca:
+                distance, filled = ppca(x, available)
+                result["ppca_observed"] = (torch.log1p(distance).cpu().numpy() - ppca_center) / ppca_spread
+                result["ppca_usad_observed"] = (
+                    clean.copy() if available.all() else score_all_and_observed(filled, available)[1]
+                )
+            return result
         control = orient(score_raw(median_filled))
         proposed = control.copy() if available.all() else orient(score_raw(clmm_filled))
         return {"median": control, "clmm": proposed}
@@ -186,13 +238,21 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
     return predict
 
 
-def evaluate(dataset, rows, hb, seed, out, observed_residual=False):
+def robust_healthy_threshold(calibration, specificity):
+    center = np.median(calibration)
+    spread = 1.4826 * np.median(np.abs(calibration - center))
+    if spread <= 0:
+        return None
+    return float(np.nextafter(center + NormalDist().inv_cdf(specificity) * spread, np.inf))
+
+
+def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=False):
     scores = pd.DataFrame(rows)
     keys = ["sample_id", "condition", "replicate", "method"]
     if scores.duplicated(keys).any() or not np.isfinite(scores.score).all():
         raise ValueError(f"{dataset}: duplicated or nonfinite scores")
     scores.to_csv(out / f"{dataset}_scores.csv.gz", compression="gzip", index=False)
-    results = []
+    results, calibration_results, threshold_audit = [], [], []
     for method, frame in scores.groupby("method"):
         calibration = frame.loc[
             frame.split.eq("val") & frame.label.eq(0) & frame.condition.eq("clean"), "score"
@@ -200,6 +260,18 @@ def evaluate(dataset, rows, hb, seed, out, observed_residual=False):
         if len(calibration) != (20 if dataset == "HellBridge" else 6):
             raise ValueError(f"{dataset}: unexpected healthy calibration size")
         threshold = hb.threshold_from_healthy(calibration, SPECIFICITY)
+        robust = robust_healthy_threshold(calibration, SPECIFICITY) if use_ppca else None
+        if use_ppca:
+            cal_rows = frame.loc[frame.split.eq("val") & frame.label.eq(0) & frame.condition.eq("clean")]
+            for index, row in enumerate(cal_rows.itertuples()):
+                remaining = np.delete(calibration, index)
+                threshold_audit.append({
+                    "dataset": dataset, "method": method, "sample_id": row.sample_id,
+                    "score": row.score, "quantile": threshold,
+                    "quantile_without_record": hb.threshold_from_healthy(remaining, SPECIFICITY),
+                    "robust": robust,
+                    "robust_without_record": robust_healthy_threshold(remaining, SPECIFICITY),
+                })
         for (condition, rep), test in frame[frame.split.eq("test")].groupby(["condition", "replicate"]):
             labels = test.label.to_numpy(dtype=int)
             values = test.score.to_numpy(dtype=float)
@@ -210,11 +282,25 @@ def evaluate(dataset, rows, hb, seed, out, observed_residual=False):
                 "recall_at_fpr_05": recall_at_fpr(labels, values, 0.05),
                 "recall_at_fpr_10": recall_at_fpr(labels, values, 0.10),
             })
+            if use_ppca:
+                calibration_results.append({
+                    **results[-1], "threshold_mode": "empirical_q90",
+                    "calibration_fpr": float((calibration >= threshold).mean()),
+                })
+                if robust is not None:
+                    calibration_results.append({
+                        **results[-1], **hb.publication_metrics(labels, values, robust),
+                        "threshold": robust, "threshold_mode": "median_mad",
+                        "calibration_fpr": float((calibration >= robust).mean()),
+                    })
     metrics = pd.DataFrame(results)
-    expected = 24 if observed_residual else 12
+    expected = 36 if use_ppca else (24 if observed_residual else 12)
     if len(metrics) != expected:
         raise ValueError(f"{dataset}: expected {expected} metric rows")
     metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
+    if use_ppca:
+        pd.DataFrame(calibration_results).to_csv(out / f"{dataset}_threshold_comparison.csv", index=False)
+        pd.DataFrame(threshold_audit).to_csv(out / f"{dataset}_healthy_threshold_audit.csv", index=False)
     return metrics
 
 
@@ -239,11 +325,15 @@ def main():
                         help="Use compact USAD with fit-only weighted residual and upper-tail scoring")
     parser.add_argument("--observed-residual", action="store_true",
                         help="Add observed-channel scoring for both median and CLMM completion")
+    parser.add_argument("--ppca", action="store_true",
+                        help="Add observed PPCA scoring and PPCA completion before USAD")
     args = parser.parse_args()
     if args.weighted_upper and args.detector != "usad":
         parser.error("--weighted-upper requires --detector usad")
     if args.observed_residual and not args.weighted_upper:
         parser.error("--observed-residual requires --weighted-upper")
+    if args.ppca and not args.observed_residual:
+        parser.error("--ppca requires --observed-residual")
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
     from run_hellbridge_tsad_baselines import read_al40
@@ -272,7 +362,7 @@ def main():
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40, transform)
     predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
-                          args.detector, args.weighted_upper, args.observed_residual)
+                          args.detector, args.weighted_upper, args.observed_residual, args.ppca)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -283,7 +373,7 @@ def main():
         if role == "test":
             for rep, mask in enumerate(hell_masks, 1):
                 append_scores(rows, predictor(raw[indices], mask), ids, labels, role, "sensor_0.30", rep)
-    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual)
+    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual, args.ppca)
     del predictor, raw, rows
 
     manifest = z24.load_manifest(args.z24_root)
@@ -303,7 +393,7 @@ def main():
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
         predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter,
-                              args.detector, args.weighted_upper, args.observed_residual)
+                              args.detector, args.weighted_upper, args.observed_residual, args.ppca)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -321,7 +411,7 @@ def main():
             torch.cuda.empty_cache()
 
     combined = pd.concat([
-        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual),
+        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual, args.ppca),
     ], ignore_index=True)
     combined.insert(1, "detector", args.detector)
     combined.to_csv(out / "metrics_per_mask.csv", index=False)
@@ -358,6 +448,9 @@ def main():
         "fit": "healthy-only", "detector": args.detector,
         "score_rule": rule,
         "observed_residual_ablation": args.observed_residual,
+        "ppca": args.ppca,
+        "ppca_rank_limit": 8 if args.ppca else None,
+        "threshold_sensitivity": "healthy clean median + Gaussian q90 times scaled MAD" if args.ppca else None,
         "observed_residual_rule": "mean weighted residual over observed channels, same clean reference",
         "score_direction": "upper-tail" if args.weighted_upper else "two-sided",
         "usad_hidden_widths": [512, 256, 64] if args.weighted_upper else None,
