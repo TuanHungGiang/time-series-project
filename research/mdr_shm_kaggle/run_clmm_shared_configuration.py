@@ -56,7 +56,8 @@ def hell_features(h5_path, manifest, read_al40):
     return features
 
 
-def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper=False):
+def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
+              weighted_upper=False, observed_residual=False):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
@@ -94,8 +95,11 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper
             floor = np.maximum(np.quantile(scale, 0.25, axis=1, keepdims=True), 1e-6)
             coordinate_scale = torch.as_tensor(np.maximum(scale, floor), device=device)
 
+            def weighted_errors(x):
+                return usad_residual(x) / coordinate_scale
+
             def detector(x):
-                return (usad_residual(x) / coordinate_scale).mean((1, 2))
+                return weighted_errors(x).mean((1, 2))
 
         else:
             def detector(x):
@@ -121,6 +125,18 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper
         return normalized if weighted_upper else np.abs(normalized)
 
     @torch.no_grad()
+    def score_all_and_observed(values, available):
+        indices = torch.as_tensor(np.flatnonzero(available), dtype=torch.long, device=device)
+        if not indices.numel():
+            raise ValueError("Observed-only scoring requires at least one channel")
+        full, observed = [], []
+        for batch in values.split(BATCH):
+            errors = weighted_errors(batch)
+            full.append(torch.log1p(errors.mean((1, 2))).cpu().numpy())
+            observed.append(torch.log1p(errors.index_select(1, indices).mean((1, 2))).cpu().numpy())
+        return orient(np.concatenate(full)), orient(np.concatenate(observed))
+
+    @torch.no_grad()
     def predict(raw, available):
         x = torch.as_tensor(scaler.transform(raw), device=device)
         mask = torch.as_tensor(available, device=device).view(1, -1, 1)
@@ -135,6 +151,18 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper
                 candidate = (median + residual).clamp(0, 1)
                 chunks.append(torch.where(mask, batch, candidate))
             clmm_filled = torch.cat(chunks)
+        if observed_residual:
+            if available.all():
+                clean = orient(score_raw(x))
+                return {name: clean.copy() for name in (
+                    "median", "clmm", "median_observed", "clmm_observed",
+                )}
+            median_full, median_observed = score_all_and_observed(median_filled, available)
+            clmm_full, clmm_observed = score_all_and_observed(clmm_filled, available)
+            return {
+                "median": median_full, "clmm": clmm_full,
+                "median_observed": median_observed, "clmm_observed": clmm_observed,
+            }
         control = orient(score_raw(median_filled))
         proposed = control.copy() if available.all() else orient(score_raw(clmm_filled))
         return {"median": control, "clmm": proposed}
@@ -142,7 +170,7 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper
     return predict
 
 
-def evaluate(dataset, rows, hb, seed, out):
+def evaluate(dataset, rows, hb, seed, out, observed_residual=False):
     scores = pd.DataFrame(rows)
     keys = ["sample_id", "condition", "replicate", "method"]
     if scores.duplicated(keys).any() or not np.isfinite(scores.score).all():
@@ -167,8 +195,9 @@ def evaluate(dataset, rows, hb, seed, out):
                 "recall_at_fpr_10": recall_at_fpr(labels, values, 0.10),
             })
     metrics = pd.DataFrame(results)
-    if len(metrics) != 12:
-        raise ValueError(f"{dataset}: expected 2 methods x 6 scenarios")
+    expected = 24 if observed_residual else 12
+    if len(metrics) != expected:
+        raise ValueError(f"{dataset}: expected {expected} metric rows")
     metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
     return metrics
 
@@ -191,9 +220,13 @@ def main():
     parser.add_argument("--detector", choices=BACKBONES, default="usad")
     parser.add_argument("--weighted-upper", action="store_true",
                         help="Use compact USAD with fit-only weighted residual and upper-tail scoring")
+    parser.add_argument("--observed-residual", action="store_true",
+                        help="Add observed-channel scoring for both median and CLMM completion")
     args = parser.parse_args()
     if args.weighted_upper and args.detector != "usad":
         parser.error("--weighted-upper requires --detector usad")
+    if args.observed_residual and not args.weighted_upper:
+        parser.error("--observed-residual requires --weighted-upper")
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
     from run_hellbridge_tsad_baselines import read_al40
@@ -205,6 +238,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rule = "weighted_upper" if args.weighted_upper else "native_two_sided"
     print(f"Shared configuration: {args.detector}/{rule} | 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
+    print(f"Observed-residual ablation: {args.observed_residual}", flush=True)
 
     split = out / "hellbridge_split"
     prepare = Path(__file__).resolve().with_name("prepare_hellbridge_paper_split.py")
@@ -219,7 +253,7 @@ def main():
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40)
     predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
-                          args.detector, args.weighted_upper)
+                          args.detector, args.weighted_upper, args.observed_residual)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -230,7 +264,7 @@ def main():
         if role == "test":
             for rep, mask in enumerate(hell_masks, 1):
                 append_scores(rows, predictor(raw[indices], mask), ids, labels, role, "sensor_0.30", rep)
-    hell = evaluate("HellBridge", rows, hb, args.seed, out)
+    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual)
     del predictor, raw, rows
 
     manifest = z24.load_manifest(args.z24_root)
@@ -250,7 +284,7 @@ def main():
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
         predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter,
-                              args.detector, args.weighted_upper)
+                              args.detector, args.weighted_upper, args.observed_residual)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -267,7 +301,9 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    combined = pd.concat([hell, evaluate("Z24", rows, hb, args.seed, out)], ignore_index=True)
+    combined = pd.concat([
+        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual),
+    ], ignore_index=True)
     combined.insert(1, "detector", args.detector)
     combined.to_csv(out / "metrics_per_mask.csv", index=False)
     fields = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_at_fpr_05", "recall_at_fpr_10"]
@@ -278,11 +314,31 @@ def main():
     delta = pairs.xs("clmm", axis=1, level="method") - pairs.xs("median", axis=1, level="method")
     delta.to_csv(out / "clmm_delta_per_mask.csv")
     delta.groupby(level=["dataset", "condition"]).mean().to_csv(out / "clmm_delta_summary.csv")
+    if args.observed_residual:
+        comparisons = []
+        for candidate, control in (
+            ("median_observed", "median"),
+            ("clmm_observed", "clmm"),
+            ("clmm_observed", "median_observed"),
+            ("clmm_observed", "median"),
+        ):
+            change = pairs.xs(candidate, axis=1, level="method") - pairs.xs(control, axis=1, level="method")
+            change = change.reset_index()
+            change["candidate"] = candidate
+            change["control"] = control
+            comparisons.append(change)
+        observed_delta = pd.concat(comparisons, ignore_index=True)
+        observed_delta.to_csv(out / "observed_delta_per_mask.csv", index=False)
+        observed_delta.groupby(["dataset", "condition", "candidate", "control"])[
+            fields
+        ].mean().to_csv(out / "observed_delta_summary.csv")
     (out / "protocol.json").write_text(json.dumps({
         "seed": args.seed, "sampling_rate_hz": FS, "window_samples": LENGTH,
         "frequency_limit_hz": FREQUENCY_LIMIT, "frequency_bins": BINS,
         "fit": "healthy-only", "detector": args.detector,
         "score_rule": rule,
+        "observed_residual_ablation": args.observed_residual,
+        "observed_residual_rule": "mean weighted residual over observed channels, same clean reference",
         "score_direction": "upper-tail" if args.weighted_upper else "two-sided",
         "usad_hidden_widths": [512, 256, 64] if args.weighted_upper else None,
         "threshold": "healthy-only clean, fixed across test masks",
