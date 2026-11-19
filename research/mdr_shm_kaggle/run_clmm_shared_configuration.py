@@ -23,7 +23,7 @@ BINS = 128
 BATCH = 16
 RATE = 0.30
 SPECIFICITY = 0.90
-OBJECTIVES = ("pca_spe", "usad")
+BACKBONES = ("usad", "pca_spe")
 FREQUENCIES = np.fft.rfftfreq(LENGTH, d=1 / FS)[1:]
 EDGES = np.searchsorted(FREQUENCIES, np.linspace(0, FREQUENCY_LIMIT, BINS + 1))
 TAPER = np.hanning(LENGTH).astype(np.float32)
@@ -56,44 +56,43 @@ def hell_features(h5_path, manifest, read_al40):
     return features
 
 
-def fit_group(raw_fit, seed, device, hb, adapter_class):
+def fit_group(raw_fit, seed, device, hb, adapter_class, backbone):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
     hb.seed_everything(seed)
-    source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
-    pca = PCA(n_components=0.95, svd_solver="full").fit(fit.reshape(len(fit), -1))
-    mean = torch.as_tensor(pca.mean_, dtype=torch.float32, device=device)
-    basis = torch.as_tensor(pca.components_, dtype=torch.float32, device=device)
+    if backbone == "pca_spe":
+        pca = PCA(n_components=0.95, svd_solver="full").fit(fit.reshape(len(fit), -1))
+        mean = torch.as_tensor(pca.mean_, dtype=torch.float32, device=device)
+        basis = torch.as_tensor(pca.components_, dtype=torch.float32, device=device)
 
-    def pca_spe(x):
-        centered = x.flatten(1) - mean
-        return (centered - (centered @ basis.T) @ basis).square().mean(1)
+        def detector(x):
+            centered = x.flatten(1) - mean
+            return (centered - (centered @ basis.T) @ basis).square().mean(1)
 
-    def usad_error(x):
-        flat = x.flatten(1)
-        first = source.decoder1(source.encoder(flat))
-        cycle = source.decoder2(source.encoder(first))
-        return (0.5 * (flat - first).square() + 0.5 * (flat - cycle).square()).mean(1)
+    else:
+        source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
 
-    detectors = {"pca_spe": pca_spe, "usad": usad_error}
+        def detector(x):
+            flat = x.flatten(1)
+            first = source.decoder1(source.encoder(flat))
+            cycle = source.decoder2(source.encoder(first))
+            return (0.5 * (flat - first).square() + 0.5 * (flat - cycle).square()).mean(1)
+
     adapter, _ = train_adapter(
-        adapter_class, fit, detectors, OBJECTIVES, seed + 97, 20, device, hb.seed_everything,
+        adapter_class, fit, {backbone: detector}, (backbone,), seed + 97,
+        20, device, hb.seed_everything,
     )
 
     @torch.no_grad()
     def score_raw(values):
-        scores = {name: [] for name in detectors}
-        for batch in values.split(BATCH):
-            for name, score in detectors.items():
-                scores[name].append(torch.log1p(score(batch)).cpu().numpy())
-        return {name: np.concatenate(parts).astype(float) for name, parts in scores.items()}
+        return np.concatenate([
+            torch.log1p(detector(batch)).cpu().numpy() for batch in values.split(BATCH)
+        ]).astype(float)
 
-    anchors = {}
-    for name, scores in score_raw(torch.as_tensor(fit, device=device)).items():
-        center = float(np.median(scores))
-        spread = max(1.4826 * np.median(np.abs(scores - center)), 0.25 * scores.std(), 1e-4)
-        anchors[name] = (center, spread)
+    reference = score_raw(torch.as_tensor(fit, device=device))
+    center = float(np.median(reference))
+    spread = max(1.4826 * np.median(np.abs(reference - center)), 0.25 * reference.std(), 1e-4)
 
     @torch.no_grad()
     def predict(raw, available):
@@ -110,17 +109,9 @@ def fit_group(raw_fit, seed, device, hb, adapter_class):
                 candidate = (median + residual).clamp(0, 1)
                 chunks.append(torch.where(mask, batch, candidate))
             clmm_filled = torch.cat(chunks)
-        outputs = {}
-        for variant, scores in (("median", score_raw(median_filled)),
-                                ("clmm", score_raw(clmm_filled))):
-            normalized = {
-                name: np.abs((score - anchors[name][0]) / anchors[name][1])
-                for name, score in scores.items()
-            }
-            outputs[f"pca_spe_{variant}"] = normalized["pca_spe"]
-            outputs[f"usad_{variant}"] = normalized["usad"]
-            outputs[f"ensemble_{variant}"] = 0.5 * (normalized["pca_spe"] + normalized["usad"])
-        return outputs
+        control = np.abs((score_raw(median_filled) - center) / spread)
+        proposed = control.copy() if available.all() else np.abs((score_raw(clmm_filled) - center) / spread)
+        return {"median": control, "clmm": proposed}
 
     return predict
 
@@ -150,8 +141,8 @@ def evaluate(dataset, rows, hb, seed, out):
                 "recall_at_fpr_10": recall_at_fpr(labels, values, 0.10),
             })
     metrics = pd.DataFrame(results)
-    if len(metrics) != 36:
-        raise ValueError(f"{dataset}: expected 6 methods x 6 scenarios")
+    if len(metrics) != 12:
+        raise ValueError(f"{dataset}: expected 2 methods x 6 scenarios")
     metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
     return metrics
 
@@ -171,6 +162,7 @@ def main():
     parser.add_argument("--z24-root", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=20270901)
+    parser.add_argument("--detector", choices=BACKBONES, default="usad")
     args = parser.parse_args()
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
@@ -181,7 +173,7 @@ def main():
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Shared configuration: 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
+    print(f"Shared configuration: {args.detector} | 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
 
     split = out / "hellbridge_split"
     prepare = Path(__file__).resolve().with_name("prepare_hellbridge_paper_split.py")
@@ -195,7 +187,7 @@ def main():
     ).reset_index(drop=True)
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40)
-    predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter)
+    predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter, args.detector)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -225,7 +217,7 @@ def main():
 
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
-        predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter)
+        predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter, args.detector)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -243,20 +235,21 @@ def main():
             torch.cuda.empty_cache()
 
     combined = pd.concat([hell, evaluate("Z24", rows, hb, args.seed, out)], ignore_index=True)
+    combined.insert(1, "detector", args.detector)
     combined.to_csv(out / "metrics_per_mask.csv", index=False)
     fields = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_at_fpr_05", "recall_at_fpr_10"]
-    groups = ["dataset", "condition", "method"]
+    groups = ["dataset", "detector", "condition", "method"]
     summary = combined.groupby(groups)[fields].mean().reset_index()
     summary.to_csv(out / "summary.csv", index=False)
     pairs = combined.pivot(index=["dataset", "condition", "replicate"], columns="method", values=fields)
-    delta = pairs.xs("ensemble_clmm", axis=1, level="method") - pairs.xs("ensemble_median", axis=1, level="method")
-    delta.to_csv(out / "ensemble_delta_per_mask.csv")
-    delta.groupby(level=["dataset", "condition"]).mean().to_csv(out / "ensemble_delta_summary.csv")
+    delta = pairs.xs("clmm", axis=1, level="method") - pairs.xs("median", axis=1, level="method")
+    delta.to_csv(out / "clmm_delta_per_mask.csv")
+    delta.groupby(level=["dataset", "condition"]).mean().to_csv(out / "clmm_delta_summary.csv")
     (out / "protocol.json").write_text(json.dumps({
         "seed": args.seed, "sampling_rate_hz": FS, "window_samples": LENGTH,
         "frequency_limit_hz": FREQUENCY_LIMIT, "frequency_bins": BINS,
-        "fit": "healthy-only", "detectors": OBJECTIVES, "fusion_weights": [0.5, 0.5],
-        "score_direction": "two-sided for both detectors and bridges",
+        "fit": "healthy-only", "detector": args.detector,
+        "score_direction": "two-sided on both bridges",
         "threshold": "healthy-only clean, fixed across test masks",
         "target_calibration_specificity": SPECIFICITY,
         "evaluation_units": {"HellBridge": "window", "Z24": "record median"},
