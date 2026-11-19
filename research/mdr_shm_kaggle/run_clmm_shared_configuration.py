@@ -30,6 +30,7 @@ FREQUENCIES = np.fft.rfftfreq(LENGTH, d=1 / FS)[1:]
 EDGES = np.searchsorted(FREQUENCIES, np.linspace(0, FREQUENCY_LIMIT, BINS + 1))
 TAPER = np.hanning(LENGTH).astype(np.float32)
 REPRESENTATIONS = ("log_power", "relative_power", "welch_log_power", "welch_relative_power")
+OBSERVED_METHODS = ("median_observed", "clmm_observed", "clmm_matched_loss")
 
 
 def spectral_features(windows, representation="log_power"):
@@ -108,7 +109,7 @@ def fit_ppca(fit, device):
 
 
 def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
-              weighted_upper=False, observed_residual=False, use_ppca=False):
+              weighted_upper=False, observed_residual=False, use_ppca=False, matched_loss=False):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
@@ -160,6 +161,16 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
         adapter_class, fit, {backbone: detector}, (backbone,), seed + 97,
         20, device, hb.seed_everything,
     )
+    if matched_loss:
+        def observed_score(x, mask):
+            error_by_channel = weighted_errors(x).mean(-1)
+            return torch.log1p((error_by_channel * mask).sum(1) / mask.sum(1))
+
+        print("  training matched-observed-loss adapter", flush=True)
+        matched_adapter, _ = train_adapter(
+            adapter_class, fit, {backbone: detector}, (backbone,), seed + 97,
+            20, device, hb.seed_everything, observed_score=observed_score,
+        )
 
     @torch.no_grad()
     def score_raw(values):
@@ -196,21 +207,21 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
         ppca_spread = max(1.4826 * np.median(np.abs(reference - ppca_center)),
                           0.25 * reference.std(), 1e-4)
 
+    def complete(x, mask, completion_adapter):
+        chunks = []
+        for batch in x.split(BATCH):
+            observed = mask.squeeze(-1).expand(len(batch), -1).to(batch.dtype)
+            residual = completion_adapter((batch - median) * mask, observed)
+            candidate = (median + residual).clamp(0, 1)
+            chunks.append(torch.where(mask, batch, candidate))
+        return torch.cat(chunks)
+
     @torch.no_grad()
     def predict(raw, available):
         x = torch.as_tensor(scaler.transform(raw), device=device)
         mask = torch.as_tensor(available, device=device).view(1, -1, 1)
         median_filled = torch.where(mask, x, median)
-        if available.all():
-            clmm_filled = x
-        else:
-            chunks = []
-            for batch in x.split(BATCH):
-                observed = mask.squeeze(-1).expand(len(batch), -1).to(batch.dtype)
-                residual = adapter((batch - median) * mask, observed)
-                candidate = (median + residual).clamp(0, 1)
-                chunks.append(torch.where(mask, batch, candidate))
-            clmm_filled = torch.cat(chunks)
+        clmm_filled = x if available.all() else complete(x, mask, adapter)
         if observed_residual:
             if available.all():
                 clean = orient(score_raw(x))
@@ -230,6 +241,11 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
                 result["ppca_usad_observed"] = (
                     clean.copy() if available.all() else score_all_and_observed(filled, available)[1]
                 )
+            if matched_loss:
+                result["clmm_matched_loss"] = (
+                    clean.copy() if available.all()
+                    else score_all_and_observed(complete(x, mask, matched_adapter), available)[1]
+                )
             return result
         control = orient(score_raw(median_filled))
         proposed = control.copy() if available.all() else orient(score_raw(clmm_filled))
@@ -246,7 +262,7 @@ def robust_healthy_threshold(calibration, specificity):
     return float(np.nextafter(center + NormalDist().inv_cdf(specificity) * spread, np.inf))
 
 
-def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=False):
+def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=False, matched_loss=False):
     scores = pd.DataFrame(rows)
     keys = ["sample_id", "condition", "replicate", "method"]
     if scores.duplicated(keys).any() or not np.isfinite(scores.score).all():
@@ -279,6 +295,8 @@ def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=Fal
                 "dataset": dataset, "seed": seed, "method": method,
                 "condition": condition, "replicate": rep, "threshold": threshold,
                 **hb.publication_metrics(labels, values, threshold),
+                "false_positives": int(((labels == 0) & (values >= threshold)).sum()),
+                "true_positives": int(((labels == 1) & (values >= threshold)).sum()),
                 "recall_at_fpr_05": recall_at_fpr(labels, values, 0.05),
                 "recall_at_fpr_10": recall_at_fpr(labels, values, 0.10),
             })
@@ -292,9 +310,13 @@ def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=Fal
                         **results[-1], **hb.publication_metrics(labels, values, robust),
                         "threshold": robust, "threshold_mode": "median_mad",
                         "calibration_fpr": float((calibration >= robust).mean()),
+                        "false_positives": int(((labels == 0) & (values >= robust)).sum()),
+                        "true_positives": int(((labels == 1) & (values >= robust)).sum()),
                     })
     metrics = pd.DataFrame(results)
     expected = 36 if use_ppca else (24 if observed_residual else 12)
+    if matched_loss:
+        expected += 6 * (4 if dataset == "Z24" else 1)
     if len(metrics) != expected:
         raise ValueError(f"{dataset}: expected {expected} metric rows")
     metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
@@ -327,6 +349,8 @@ def main():
                         help="Add observed-channel scoring for both median and CLMM completion")
     parser.add_argument("--ppca", action="store_true",
                         help="Add observed PPCA scoring and PPCA completion before USAD")
+    parser.add_argument("--matched-loss", action="store_true",
+                        help="Compare observed-channel consistency and export Z24 window scores with q90 pooling")
     args = parser.parse_args()
     if args.weighted_upper and args.detector != "usad":
         parser.error("--weighted-upper requires --detector usad")
@@ -334,6 +358,8 @@ def main():
         parser.error("--observed-residual requires --weighted-upper")
     if args.ppca and not args.observed_residual:
         parser.error("--ppca requires --observed-residual")
+    if args.matched_loss and not args.observed_residual:
+        parser.error("--matched-loss requires --observed-residual")
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
     from run_hellbridge_tsad_baselines import read_al40
@@ -362,7 +388,7 @@ def main():
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40, transform)
     predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
-                          args.detector, args.weighted_upper, args.observed_residual, args.ppca)
+                          args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -373,11 +399,11 @@ def main():
         if role == "test":
             for rep, mask in enumerate(hell_masks, 1):
                 append_scores(rows, predictor(raw[indices], mask), ids, labels, role, "sensor_0.30", rep)
-    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual, args.ppca)
+    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss)
     del predictor, raw, rows
 
     manifest = z24.load_manifest(args.z24_root)
-    rows = []
+    rows, window_scores = [], []
     for index, ((setup, excitation), channels) in enumerate(sorted(z24.stable_sensor_map(manifest).items())):
         print(f"Z24 setup={setup} excitation={excitation}", flush=True)
         group = manifest[(manifest.setup == setup) & (manifest.excitation == excitation)]
@@ -393,7 +419,7 @@ def main():
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
         predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter,
-                              args.detector, args.weighted_upper, args.observed_residual, args.ppca)
+                              args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -404,18 +430,33 @@ def main():
                     )) for rep in range(5)
                 )
             for condition, rep, mask in scenarios:
-                record_scores = {name: [np.median(scores)] for name, scores in predictor(features, mask).items()}
+                per_window = predictor(features, mask)
+                record_scores = {name: [np.median(scores)] for name, scores in per_window.items()}
+                if args.matched_loss:
+                    record_scores.update({
+                        f"{name}_q90": [np.quantile(per_window[name], 0.90)] for name in OBSERVED_METHODS
+                    })
+                    window_scores.append(pd.DataFrame({
+                        "record_id": row.record_id, "window": np.arange(len(features)),
+                        "setup": setup, "excitation": excitation, "state": row.state,
+                        "split": row.split, "label": row.label, "condition": condition, "replicate": rep,
+                        **{name: per_window[name] for name in OBSERVED_METHODS},
+                    }))
                 append_scores(rows, record_scores, [row.record_id], [row.label], row.split, condition, rep)
         del predictor
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
+    if args.matched_loss:
+        pd.concat(window_scores, ignore_index=True).to_csv(out / "Z24_window_scores.csv.gz", index=False)
     combined = pd.concat([
-        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual, args.ppca),
+        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss),
     ], ignore_index=True)
     combined.insert(1, "detector", args.detector)
     combined.to_csv(out / "metrics_per_mask.csv", index=False)
     fields = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_at_fpr_05", "recall_at_fpr_10"]
+    if args.matched_loss:
+        fields += ["false_positives", "true_positives"]
     groups = ["dataset", "detector", "condition", "method"]
     summary = combined.groupby(groups)[fields].mean().reset_index()
     summary.to_csv(out / "summary.csv", index=False)
@@ -449,6 +490,9 @@ def main():
         "score_rule": rule,
         "observed_residual_ablation": args.observed_residual,
         "ppca": args.ppca,
+        "matched_loss": args.matched_loss,
+        "matched_loss_target": "same observed-channel USAD score, full healthy versus completed" if args.matched_loss else None,
+        "z24_pooling_ablation": ["median", "q90"] if args.matched_loss else None,
         "ppca_rank_limit": 8 if args.ppca else None,
         "ppca_solver": "NumPy CPU" if args.ppca else None,
         "threshold_sensitivity": "healthy clean median + Gaussian q90 times scaled MAD" if args.ppca else None,
