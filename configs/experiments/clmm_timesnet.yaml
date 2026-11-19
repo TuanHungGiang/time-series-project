@@ -1,0 +1,8 @@
+seed: 20270905
+timesnet_epochs: 30
+adapter_epochs: 20
+batch_size: 16
+sensor_loss: [0.10, 0.30, 0.50]
+mask_replicates: 5
+probe_groups: 4
+spectral_weight: 0.20

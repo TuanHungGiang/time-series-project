@@ -1,0 +1,7 @@
+dataset: HellBridge
+local_h5: data/hellbridge/raw/data_100Hz.h5
+regime: P2_NM_Z
+split_profile: svendsen2022
+split_seed: 20261113
+resampled_window_length: 128
+evaluation_unit: window

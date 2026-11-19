@@ -1,0 +1,13 @@
+# Model specification used by the experiment configuration.
+backbone: TimesNet
+training: healthy_only
+freeze_backbone_for_adapters: true
+active_variant: clmm_time_frequency
+ablation_variants:
+  - timesnet
+  - timesnet_anchored
+  - timesnet_observed
+  - clmm_fill
+  - clmm_cross_predict
+  - clmm_observed_attention
+  - clmm_time_frequency

@@ -1,0 +1,8 @@
+dataset: Z24
+local_root: data/z24/processed/kaggle_z24_split
+manifest: metadata/records_manifest.csv
+model_group: [setup, excitation]
+raw_window: 1024
+window_stride: 1024
+downsample: 2
+evaluation_unit: record_median

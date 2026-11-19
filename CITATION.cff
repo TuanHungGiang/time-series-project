@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "Cite this software repository and the commit used for your experiment."
+title: "CLMM–TimesNet bridge monitoring experiments"
+type: software
+authors:
+  - name: "CLMM–TimesNet contributors"
+repository-code: https://github.com/TuanHungGiang/time-series-project
+version: 0.1.0

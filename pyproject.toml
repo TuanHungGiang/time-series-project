@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clmm-timesnet"
+version = "0.1.0"
+description = "Healthy-only bridge damage detection under whole-sensor loss"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py>=3.10", "numpy>=2.0", "pandas>=2.2", "pyyaml>=6.0",
+    "scikit-learn>=1.4", "scipy>=1.12", "torch>=2.2",
+]
+
+[project.scripts]
+clmm-timesnet = "clmm_timesnet.experiment:main"
+
+[project.urls]
+Repository = "https://github.com/TuanHungGiang/time-series-project"
+
+[tool.setuptools.packages.find]
+where = ["src"]

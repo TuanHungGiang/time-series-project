@@ -23,3 +23,18 @@ __pycache__/
 granite-tsfm-main/
 .deps/
 .smoke*/
+
+# CLMM–TimesNet research layout
+!notebooks/analysis/clmm_timesnet_kaggle.ipynb
+data/*/raw/**
+data/*/interim/**
+data/*/processed/**
+!data/*/*/.gitkeep
+experiments/*/*/split/
+experiments/*/*/checkpoints/
+experiments/*/*/*_scores.csv.gz
+experiments/exp*_run*/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
