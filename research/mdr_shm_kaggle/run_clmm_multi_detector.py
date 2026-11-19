@@ -53,7 +53,8 @@ def read_hell_spectrum(h5_path, manifest, read_al40):
     return result
 
 
-def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs, device, seed_all):
+def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs,
+                  device, seed_all, nested_weight=0.0):
     seed_all(seed)
     _, channels, length = fit.shape
     adapter = adapter_class(channels, length, 64, 4).to(device)
@@ -79,10 +80,11 @@ def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs,
         for offset in range(0, len(fit), 16):
             indices = permutation[offset:offset + 16].tolist()
             x = values[indices]
-            available = np.stack([
-                sensor_mask(channels, float(rng.choice(RATES)), rng.permutation(channels))
-                for _ in indices
-            ])
+            rates_and_orders = [
+                (float(rng.choice(RATES)), rng.permutation(channels)) for _ in indices
+            ]
+            available = np.stack([sensor_mask(channels, rate, order)
+                                  for rate, order in rates_and_orders])
             mask = torch.as_tensor(available, dtype=x.dtype, device=device)
             missing = 1 - mask.unsqueeze(-1)
             residual = adapter((x - median) * mask.unsqueeze(-1), mask)
@@ -91,24 +93,47 @@ def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs,
             error = F.smooth_l1_loss(prediction, x, reduction="none", beta=0.05)
             reconstruction = (error * missing).sum() / (missing.sum() * length)
             consistency = x.new_zeros(())
+            nested = x.new_zeros(())
             if objectives:
-                consistency = torch.stack([
-                    F.smooth_l1_loss(
-                        (torch.log1p(score_functions[name](completed)) - targets[name][indices])
-                        / scales[name],
-                        torch.zeros(len(indices), device=device),
-                    )
-                    for name in objectives
-                ]).mean()
-            loss = reconstruction + 0.10 * consistency
+                completed_scores = {
+                    name: torch.log1p(score_functions[name](completed)) for name in objectives
+                }
+
+                def difference(name, target):
+                    gap = (completed_scores[name] - target) / scales[name]
+                    return F.smooth_l1_loss(gap, torch.zeros_like(gap))
+
+                consistency = torch.stack([difference(name, targets[name][indices])
+                                           for name in objectives]).mean()
+                if nested_weight:
+                    milder = np.stack([
+                        sensor_mask(channels, rate / 2 if round(rate * channels) > 1 else 0, order)
+                        for rate, order in rates_and_orders
+                    ])
+                    mild_mask = torch.as_tensor(milder, dtype=x.dtype, device=device)
+                    mild_mask = mild_mask.unsqueeze(-1)
+                    with torch.no_grad():
+                        mild_prediction = (
+                            median + adapter((x - median) * mild_mask, mild_mask.squeeze(-1))
+                        ).clamp(0, 1)
+                        mild_completed = torch.where(mild_mask.bool(), x, mild_prediction)
+                        mild_scores = {
+                            name: torch.log1p(score_functions[name](mild_completed))
+                            for name in objectives
+                        }
+                    nested = torch.stack([difference(name, mild_scores[name])
+                                          for name in objectives]).mean()
+            loss = reconstruction + 0.10 * consistency + nested_weight * nested
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(adapter.parameters(), 5.0)
             optimizer.step()
-            stats.append([float(reconstruction.detach()), float(consistency.detach())])
+            stats.append([float(reconstruction.detach()), float(consistency.detach()),
+                          float(nested.detach())])
         if epoch == 0 or (epoch + 1) % 5 == 0 or epoch + 1 == epochs:
-            recon, score = np.mean(stats, axis=0)
-            print(f"  epoch={epoch + 1}/{epochs} recon={recon:.6f} score={score:.6f}", flush=True)
+            recon, score, nested_score = np.mean(stats, axis=0)
+            print(f"  epoch={epoch + 1}/{epochs} recon={recon:.6f} "
+                  f"score={score:.6f} nested={nested_score:.6f}", flush=True)
     return adapter.eval(), median
 
 
@@ -125,8 +150,11 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=20270901)
     parser.add_argument("--adapter-epochs", type=int, default=20)
+    parser.add_argument("--nested-weight", type=float, default=0.05)
     parser.add_argument("--timesnet-z24", action="store_true")
     args = parser.parse_args()
+    if args.nested_weight < 0:
+        parser.error("--nested-weight must be nonnegative")
     sys.path.insert(0, str(args.source_dir.resolve()))
     import run_hellbridge_source_baselines as hb
     import run_z24_clmm_v21 as v21
@@ -187,11 +215,18 @@ def main():
             16, 64, 4, 4, 0.0, 0.10, device, seed + 97,
         )
         adapters = {}
-        for name, objectives in OBJECTIVES.items():
+        objectives_list = dict(OBJECTIVES)
+        nested_name = "nested_multi" if hellbridge else "nested_usad"
+        if args.nested_weight > 0:
+            objectives_list[nested_name] = OBJECTIVES[
+                "multi_consistency" if hellbridge else "usad_consistency"
+            ]
+        for name, objectives in objectives_list.items():
             print(f"  FIT {name} seed={seed}", flush=True)
             adapters[name] = train_adapter(
                 CrossSensorAdapter, fit, scores, objectives, seed + 97, args.adapter_epochs,
                 device, hb.seed_everything,
+                nested_weight=args.nested_weight if name == nested_name else 0.0,
             )
         median = np.median(fit, axis=0)
         spec_spread = np.maximum(
@@ -261,26 +296,37 @@ def main():
         metrics = []
         for (detector, variant, condition), cohort in frame.groupby(["detector", "variant", "condition"]):
             calibration = frame[(frame.split == "val") & (frame.detector == detector)]
-            if dataset == "HellBridge":
-                # All completions are identity on clean. Calibrate once per detector.
-                calibration = calibration[(calibration.condition == "clean") &
-                                           (calibration.variant == variant)]
-                threshold = hb.threshold_from_healthy(calibration.score.to_numpy(), 0.90)
-            else:
-                calibration = calibration[(calibration.condition == condition) &
-                                           (calibration.variant == variant)]
+            calibration = calibration[calibration.variant == variant]
+            if dataset == "Z24":
+                calibration = calibration[calibration.condition == condition]
                 threshold, _ = threshold_under_fpr_cap(
                     calibration.label.to_numpy(), calibration.score.to_numpy(), 0.20,
                 )
             for rep, test in cohort[cohort.split == "test"].groupby("replicate"):
                 labels, scores = test.label.to_numpy(), test.score.to_numpy()
-                metrics.append({
-                    "dataset": dataset, "seed": args.seed, "detector": detector,
-                    "variant": variant, "condition": condition, "replicate": rep,
-                    "threshold": threshold, **hb.publication_metrics(labels, scores, threshold),
-                    "recall_at_fpr_05": recall_at_fpr(labels, scores, 0.05),
-                    "recall_at_fpr_10": recall_at_fpr(labels, scores, 0.10),
-                })
+                if dataset == "HellBridge":
+                    clean = calibration[calibration.condition == "clean"]
+                    masked = calibration[(calibration.condition == condition) &
+                                         (calibration.replicate == rep)]
+                    if any(len(block) != 20 or not block.label.eq(0).all()
+                           for block in (clean, masked)):
+                        raise ValueError("Expected 20 healthy calibration scores per mask")
+                    policies = {
+                        "clean_fixed": hb.threshold_from_healthy(clean.score.to_numpy(), 0.90),
+                        "healthy_maskcal": hb.threshold_from_healthy(masked.score.to_numpy(), 0.90),
+                    }
+                else:
+                    policies = {"labeled_val_fpr20": threshold}
+                recall05 = recall_at_fpr(labels, scores, 0.05)
+                recall10 = recall_at_fpr(labels, scores, 0.10)
+                for policy, cutoff in policies.items():
+                    metrics.append({
+                        "dataset": dataset, "seed": args.seed, "detector": detector,
+                        "variant": variant, "condition": condition, "replicate": rep,
+                        "threshold_mode": policy, "threshold": cutoff,
+                        **hb.publication_metrics(labels, scores, cutoff),
+                        "recall_at_fpr_05": recall05, "recall_at_fpr_10": recall10,
+                    })
         return pd.DataFrame(metrics)
 
     split = out / "hellbridge_split"
@@ -304,8 +350,6 @@ def main():
         ids = manifest.loc[indices, "sample_id"].to_numpy()
         labels = manifest.loc[indices, "label"].to_numpy()
         for condition, rep, rate in SCENARIOS:
-            if role == "val" and rate:
-                continue
             available = sensor_mask(40, rate, orders[rep])
             for (detector, variant), scores in predict(raw[indices], available).items():
                 rows.extend(
@@ -347,21 +391,45 @@ def main():
     result = pd.concat([hell, evaluate("Z24", rows)], ignore_index=True)
     result.to_csv(out / "metrics_per_mask.csv", index=False)
     fields = ["auc", "ap", "ba", "recall", "fpr", "f1", "recall_at_fpr_05", "recall_at_fpr_10"]
-    keys = ["dataset", "detector", "condition", "replicate"]
+    keys = ["dataset", "detector", "condition", "replicate", "threshold_mode"]
     reference = result[result.variant.eq("baseline")][keys + fields]
     paired = result.merge(reference, on=keys, suffixes=("", "_baseline"), validate="many_to_one")
     deltas = [f"delta_{field}" for field in fields]
     for metric, delta in zip(fields, deltas):
         paired[delta] = paired[metric] - paired[f"{metric}_baseline"]
     paired.to_csv(out / "paired_vs_baseline_per_mask.csv", index=False)
-    summary = result.groupby(["dataset", "detector", "condition", "variant"])[fields].mean()
+    groups = ["dataset", "detector", "condition", "variant", "threshold_mode"]
+    summary = result.groupby(groups)[fields].mean()
     summary.to_csv(out / "summary.csv")
-    paired.groupby(["dataset", "detector", "condition", "variant"])[deltas].mean().to_csv(out / "paired_delta_summary.csv")
+    paired.groupby(groups)[deltas].mean().to_csv(out / "paired_delta_summary.csv")
+    parent_names = {"nested_multi": "multi_consistency", "nested_usad": "usad_consistency"}
+    comparisons = []
+    for nested, parent in parent_names.items():
+        candidate = result[result.variant.eq(nested)][keys + fields]
+        if candidate.empty:
+            continue
+        control = result[result.variant.eq(parent)][keys + fields]
+        matched = candidate.merge(control, on=keys, suffixes=("", "_parent"), validate="one_to_one")
+        if len(matched) != len(candidate):
+            raise ValueError(f"Incomplete paired comparison for {nested}")
+        comparison = matched[keys].copy()
+        comparison["variant"] = nested
+        comparison["parent"] = parent
+        for metric, delta in zip(fields, deltas):
+            comparison[delta] = matched[metric] - matched[f"{metric}_parent"]
+        comparisons.append(comparison)
+    if comparisons:
+        comparison = pd.concat(comparisons, ignore_index=True)
+        comparison.to_csv(out / "nested_vs_parent_per_mask.csv", index=False)
+        comparison.groupby(groups + ["parent"])[deltas].mean().to_csv(out / "nested_vs_parent_summary.csv")
     (out / "protocol.json").write_text(json.dumps({
         "seed": args.seed, "adapter_epochs": args.adapter_epochs,
         "adapter_objectives": OBJECTIVES, "loss_weight": 0.10,
+        "nested_weight": args.nested_weight,
+        "nested_hellbridge": "USAD and PCA-SPE, same healthy window under nested masks",
+        "nested_z24": "USAD, same healthy window under nested masks",
         "training_sensor_loss": RATES,
-        "threshold_hellbridge": "fixed healthy clean calibration, specificity target 0.90",
+        "threshold_hellbridge": "clean-fixed and mask-matched healthy calibration, specificity target 0.90",
         "threshold_z24": "condition-matched labeled validation, FPR cap 0.20",
         "z24_usad_score": "lower-tail", "z24_other_scores": "two-sided",
         "hellbridge_input": "1024-sample log-power spectrum pooled to 128 bins",
