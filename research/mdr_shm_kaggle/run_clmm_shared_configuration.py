@@ -33,6 +33,13 @@ REPRESENTATIONS = ("log_power", "relative_power", "welch_log_power", "welch_rela
 OBSERVED_METHODS = ("median_observed", "clmm_observed", "clmm_matched_loss")
 
 
+def preserve_outside_range(raw, scaler):
+    scaled = (raw - scaler.low) / np.maximum(scaler.high - scaler.low, 1e-6)
+    bounded = np.clip(scaled, 0, 1)
+    excess = scaled - bounded
+    return bounded + np.sign(excess) * np.log1p(np.abs(excess))
+
+
 def spectral_features(windows, representation="log_power"):
     """Same physical frequency bins and transform for both bridges."""
     if windows.ndim != 3 or windows.shape[-1] != LENGTH:
@@ -109,7 +116,8 @@ def fit_ppca(fit, device):
 
 
 def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
-              weighted_upper=False, observed_residual=False, use_ppca=False, matched_loss=False):
+              weighted_upper=False, observed_residual=False, use_ppca=False, matched_loss=False,
+              preserve_range=False):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
@@ -131,11 +139,12 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
         else:
             source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
 
-        def usad_residual(x):
+        def usad_residual(x, target=None):
             flat = x.flatten(1)
             first = source.decoder1(source.encoder(flat))
             cycle = source.decoder2(source.encoder(first))
-            return (0.5 * ((flat - first).square() + (flat - cycle).square())).reshape_as(x)
+            truth = flat if target is None else target.flatten(1)
+            return (0.5 * ((truth - first).square() + (truth - cycle).square())).reshape_as(x)
 
         if weighted_upper:
             with torch.no_grad():
@@ -198,6 +207,14 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
             observed.append(torch.log1p(errors.index_select(1, indices).mean((1, 2))).cpu().numpy())
         return orient(np.concatenate(full)), orient(np.concatenate(observed))
 
+    def score_preserved_range(values, target, available):
+        indices = torch.as_tensor(np.flatnonzero(available), device=device)
+        scores = []
+        for batch, truth in zip(values.split(BATCH), target.split(BATCH), strict=True):
+            residual = usad_residual(batch, truth) / coordinate_scale
+            scores.append(torch.log1p(residual.index_select(1, indices).mean((1, 2))).cpu().numpy())
+        return orient(np.concatenate(scores))
+
     if use_ppca:
         ppca = fit_ppca(fit, device)
         full = np.ones(fit.shape[1], dtype=bool)
@@ -242,10 +259,15 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone,
                     clean.copy() if available.all() else score_all_and_observed(filled, available)[1]
                 )
             if matched_loss:
+                matched_filled = x if available.all() else complete(x, mask, matched_adapter)
                 result["clmm_matched_loss"] = (
                     clean.copy() if available.all()
-                    else score_all_and_observed(complete(x, mask, matched_adapter), available)[1]
+                    else score_all_and_observed(matched_filled, available)[1]
                 )
+                if preserve_range:
+                    target = torch.as_tensor(preserve_outside_range(raw, scaler), dtype=x.dtype, device=device)
+                    result["median_preserved_range"] = score_preserved_range(median_filled, target, available)
+                    result["clmm_preserved_range"] = score_preserved_range(matched_filled, target, available)
             return result
         control = orient(score_raw(median_filled))
         proposed = control.copy() if available.all() else orient(score_raw(clmm_filled))
@@ -262,7 +284,8 @@ def robust_healthy_threshold(calibration, specificity):
     return float(np.nextafter(center + NormalDist().inv_cdf(specificity) * spread, np.inf))
 
 
-def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=False, matched_loss=False):
+def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=False, matched_loss=False,
+             preserve_range=False):
     scores = pd.DataFrame(rows)
     keys = ["sample_id", "condition", "replicate", "method"]
     if scores.duplicated(keys).any() or not np.isfinite(scores.score).all():
@@ -317,6 +340,8 @@ def evaluate(dataset, rows, hb, seed, out, observed_residual=False, use_ppca=Fal
     expected = 36 if use_ppca else (24 if observed_residual else 12)
     if matched_loss:
         expected += 6 * (4 if dataset == "Z24" else 1)
+    if preserve_range:
+        expected += 12
     if len(metrics) != expected:
         raise ValueError(f"{dataset}: expected {expected} metric rows")
     metrics.to_csv(out / f"{dataset}_metrics_per_mask.csv", index=False)
@@ -351,6 +376,8 @@ def main():
                         help="Add observed PPCA scoring and PPCA completion before USAD")
     parser.add_argument("--matched-loss", action="store_true",
                         help="Compare observed-channel consistency and export Z24 window scores with q90 pooling")
+    parser.add_argument("--preserve-range", action="store_true",
+                        help="Evaluate observed residuals with log-compressed out-of-range targets")
     args = parser.parse_args()
     if args.weighted_upper and args.detector != "usad":
         parser.error("--weighted-upper requires --detector usad")
@@ -360,6 +387,8 @@ def main():
         parser.error("--ppca requires --observed-residual")
     if args.matched_loss and not args.observed_residual:
         parser.error("--matched-loss requires --observed-residual")
+    if args.preserve_range and not args.matched_loss:
+        parser.error("--preserve-range requires --matched-loss")
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
     from run_hellbridge_tsad_baselines import read_al40
@@ -388,7 +417,8 @@ def main():
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40, transform)
     predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
-                          args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss)
+                          args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss,
+                          args.preserve_range)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -399,7 +429,8 @@ def main():
         if role == "test":
             for rep, mask in enumerate(hell_masks, 1):
                 append_scores(rows, predictor(raw[indices], mask), ids, labels, role, "sensor_0.30", rep)
-    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss)
+    hell = evaluate("HellBridge", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss,
+                    args.preserve_range)
     del predictor, raw, rows
 
     manifest = z24.load_manifest(args.z24_root)
@@ -419,7 +450,8 @@ def main():
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
         predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter,
-                              args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss)
+                              args.detector, args.weighted_upper, args.observed_residual, args.ppca, args.matched_loss,
+                              args.preserve_range)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -450,7 +482,8 @@ def main():
     if args.matched_loss:
         pd.concat(window_scores, ignore_index=True).to_csv(out / "Z24_window_scores.csv.gz", index=False)
     combined = pd.concat([
-        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss),
+        hell, evaluate("Z24", rows, hb, args.seed, out, args.observed_residual, args.ppca, args.matched_loss,
+                       args.preserve_range),
     ], ignore_index=True)
     combined.insert(1, "detector", args.detector)
     combined.to_csv(out / "metrics_per_mask.csv", index=False)
@@ -491,6 +524,7 @@ def main():
         "observed_residual_ablation": args.observed_residual,
         "ppca": args.ppca,
         "matched_loss": args.matched_loss,
+        "preserve_range": args.preserve_range,
         "matched_loss_target": "same observed-channel USAD score, full healthy versus completed" if args.matched_loss else None,
         "z24_pooling_ablation": ["median", "q90"] if args.matched_loss else None,
         "ppca_rank_limit": 8 if args.ppca else None,
