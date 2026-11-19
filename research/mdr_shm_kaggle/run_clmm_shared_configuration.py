@@ -1,6 +1,7 @@
 """One locked CLMM configuration for two bridge benchmarks."""
 
 import argparse
+from functools import partial
 import json
 from pathlib import Path
 import subprocess
@@ -9,7 +10,7 @@ import sys
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.signal import detrend
+from scipy.signal import detrend, welch
 from sklearn.decomposition import PCA
 import torch
 
@@ -27,15 +28,30 @@ BACKBONES = ("usad", "pca_spe")
 FREQUENCIES = np.fft.rfftfreq(LENGTH, d=1 / FS)[1:]
 EDGES = np.searchsorted(FREQUENCIES, np.linspace(0, FREQUENCY_LIMIT, BINS + 1))
 TAPER = np.hanning(LENGTH).astype(np.float32)
+REPRESENTATIONS = ("log_power", "relative_power", "welch_log_power", "welch_relative_power")
 
 
-def spectral_features(windows):
+def spectral_features(windows, representation="log_power"):
     """Same physical frequency bins and transform for both bridges."""
     if windows.ndim != 3 or windows.shape[-1] != LENGTH:
         raise ValueError("Expected [window, channel, 1024]")
     windows = detrend(windows, axis=-1, type="linear")
-    fft = np.fft.rfft(windows * TAPER, axis=-1)[..., 1:]
-    log_power = np.log1p(np.abs(fft[..., :EDGES[-1]]) ** 2 / LENGTH)
+    if representation not in REPRESENTATIONS:
+        raise ValueError(f"Unknown spectral representation: {representation}")
+    if representation.startswith("welch_"):
+        _, density = welch(windows, fs=FS, nperseg=512, noverlap=256,
+                           nfft=LENGTH, detrend=False, axis=-1)
+        # Convert positive-frequency density to the original periodogram scale.
+        power = density[..., 1:EDGES[-1] + 1] * (FS * np.sum(TAPER**2) / (2 * LENGTH))
+    else:
+        fft = np.fft.rfft(windows * TAPER, axis=-1)[..., 1:EDGES[-1] + 1]
+        power = np.abs(fft) ** 2 / LENGTH
+    if representation.endswith("relative_power"):
+        # Unit total in-band energy per channel. Scaling keeps mean bin power near one.
+        energy = power.sum(axis=-1, keepdims=True)
+        power = np.divide(power, energy, out=np.zeros_like(power), where=energy > 0)
+        power *= power.shape[-1]
+    log_power = np.log1p(power)
     sums = np.concatenate([
         np.zeros((*log_power.shape[:-1], 1), dtype=log_power.dtype),
         np.cumsum(log_power, axis=-1),
@@ -46,13 +62,13 @@ def spectral_features(windows):
     return pooled.astype(np.float32)
 
 
-def hell_features(h5_path, manifest, read_al40):
+def hell_features(h5_path, manifest, read_al40, transform=spectral_features):
     features = np.empty((len(manifest), 40, BINS), dtype=np.float32)
     with h5py.File(h5_path, "r") as h5:
         for record, rows in manifest.groupby("record_id", sort=False):
             values = read_al40(h5[record])
             windows = np.stack([values[:, int(r.start):int(r.stop)] for r in rows.itertuples()])
-            features[rows.index] = spectral_features(windows)
+            features[rows.index] = transform(windows)
     return features
 
 
@@ -218,6 +234,7 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=20270901)
     parser.add_argument("--detector", choices=BACKBONES, default="usad")
+    parser.add_argument("--representation", choices=REPRESENTATIONS, default="log_power")
     parser.add_argument("--weighted-upper", action="store_true",
                         help="Use compact USAD with fit-only weighted residual and upper-tail scoring")
     parser.add_argument("--observed-residual", action="store_true",
@@ -237,7 +254,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rule = "weighted_upper" if args.weighted_upper else "native_two_sided"
+    transform = partial(spectral_features, representation=args.representation)
     print(f"Shared configuration: {args.detector}/{rule} | 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
+    print(f"Representation: {args.representation}", flush=True)
     print(f"Observed-residual ablation: {args.observed_residual}", flush=True)
 
     split = out / "hellbridge_split"
@@ -251,7 +270,7 @@ def main():
         ["record_id", "start"]
     ).reset_index(drop=True)
     fit, cal, test = hb.development_split(manifest)
-    raw = hell_features(args.hell_h5, manifest, read_al40)
+    raw = hell_features(args.hell_h5, manifest, read_al40, transform)
     predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
                           args.detector, args.weighted_upper, args.observed_residual)
     rng = np.random.default_rng(20261119)
@@ -279,7 +298,7 @@ def main():
             if usable < LENGTH:
                 raise ValueError(f"No complete windows: {row.record_id}")
             windows = signal[:, :usable].reshape(len(channels), -1, LENGTH).transpose(1, 0, 2)
-            return spectral_features(windows)
+            return transform(windows)
 
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
@@ -335,6 +354,7 @@ def main():
     (out / "protocol.json").write_text(json.dumps({
         "seed": args.seed, "sampling_rate_hz": FS, "window_samples": LENGTH,
         "frequency_limit_hz": FREQUENCY_LIMIT, "frequency_bins": BINS,
+        "representation": args.representation,
         "fit": "healthy-only", "detector": args.detector,
         "score_rule": rule,
         "observed_residual_ablation": args.observed_residual,
