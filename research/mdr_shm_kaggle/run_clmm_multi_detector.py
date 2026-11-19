@@ -54,7 +54,9 @@ def read_hell_spectrum(h5_path, manifest, read_al40):
 
 
 def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs,
-                  device, seed_all, nested_weight=0.0):
+                  device, seed_all, nested_weight=0.0, observed_score=None):
+    if observed_score is not None and (len(objectives) != 1 or nested_weight):
+        raise ValueError("Observed consistency requires one detector and no nested loss")
     seed_all(seed)
     _, channels, length = fit.shape
     adapter = adapter_class(channels, length, 64, 4).to(device)
@@ -94,7 +96,12 @@ def train_adapter(adapter_class, fit, score_functions, objectives, seed, epochs,
             reconstruction = (error * missing).sum() / (missing.sum() * length)
             consistency = x.new_zeros(())
             nested = x.new_zeros(())
-            if objectives:
+            if observed_score is not None:
+                with torch.no_grad():
+                    target = observed_score(x, mask)
+                gap = (observed_score(completed, mask) - target) / scales[objectives[0]]
+                consistency = F.smooth_l1_loss(gap, torch.zeros_like(gap))
+            elif objectives:
                 completed_scores = {
                     name: torch.log1p(score_functions[name](completed)) for name in objectives
                 }
