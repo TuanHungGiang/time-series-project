@@ -56,7 +56,7 @@ def hell_features(h5_path, manifest, read_al40):
     return features
 
 
-def fit_group(raw_fit, seed, device, hb, adapter_class, backbone):
+def fit_group(raw_fit, seed, device, hb, adapter_class, backbone, weighted_upper=False):
     scaler = hb.FitMinMax(raw_fit)
     fit = scaler.transform(raw_fit)
     median = torch.as_tensor(np.median(fit, axis=0), dtype=torch.float32, device=device)
@@ -71,13 +71,35 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone):
             return (centered - (centered @ basis.T) @ basis).square().mean(1)
 
     else:
-        source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
+        if weighted_upper:
+            # Import lazily: the clean runner imports our spectral transform.
+            from run_usad_clean_two_bridges import train_compact_usad
+            source = train_compact_usad(fit, 30, BATCH, device, hb.UsadModel)
+        else:
+            source = hb.fit_usad(fit, 30, BATCH, device).eval().requires_grad_(False)
 
-        def detector(x):
+        def usad_residual(x):
             flat = x.flatten(1)
             first = source.decoder1(source.encoder(flat))
             cycle = source.decoder2(source.encoder(first))
-            return (0.5 * (flat - first).square() + 0.5 * (flat - cycle).square()).mean(1)
+            return (0.5 * ((flat - first).square() + (flat - cycle).square())).reshape_as(x)
+
+        if weighted_upper:
+            with torch.no_grad():
+                residual = np.concatenate([
+                    usad_residual(batch.to(device)).cpu().numpy()
+                    for batch in torch.from_numpy(fit).split(BATCH)
+                ]).astype(np.float64)
+            scale = np.median(residual, axis=0)
+            floor = np.maximum(np.quantile(scale, 0.25, axis=1, keepdims=True), 1e-6)
+            coordinate_scale = torch.as_tensor(np.maximum(scale, floor), device=device)
+
+            def detector(x):
+                return (usad_residual(x) / coordinate_scale).mean((1, 2))
+
+        else:
+            def detector(x):
+                return usad_residual(x).mean((1, 2))
 
     adapter, _ = train_adapter(
         adapter_class, fit, {backbone: detector}, (backbone,), seed + 97,
@@ -94,6 +116,10 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone):
     center = float(np.median(reference))
     spread = max(1.4826 * np.median(np.abs(reference - center)), 0.25 * reference.std(), 1e-4)
 
+    def orient(score):
+        normalized = (score - center) / spread
+        return normalized if weighted_upper else np.abs(normalized)
+
     @torch.no_grad()
     def predict(raw, available):
         x = torch.as_tensor(scaler.transform(raw), device=device)
@@ -109,8 +135,8 @@ def fit_group(raw_fit, seed, device, hb, adapter_class, backbone):
                 candidate = (median + residual).clamp(0, 1)
                 chunks.append(torch.where(mask, batch, candidate))
             clmm_filled = torch.cat(chunks)
-        control = np.abs((score_raw(median_filled) - center) / spread)
-        proposed = control.copy() if available.all() else np.abs((score_raw(clmm_filled) - center) / spread)
+        control = orient(score_raw(median_filled))
+        proposed = control.copy() if available.all() else orient(score_raw(clmm_filled))
         return {"median": control, "clmm": proposed}
 
     return predict
@@ -163,7 +189,11 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=20270901)
     parser.add_argument("--detector", choices=BACKBONES, default="usad")
+    parser.add_argument("--weighted-upper", action="store_true",
+                        help="Use compact USAD with fit-only weighted residual and upper-tail scoring")
     args = parser.parse_args()
+    if args.weighted_upper and args.detector != "usad":
+        parser.error("--weighted-upper requires --detector usad")
     import run_hellbridge_source_baselines as hb
     import run_z24_source_baselines as z24
     from run_hellbridge_tsad_baselines import read_al40
@@ -173,7 +203,8 @@ def main():
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Shared configuration: {args.detector} | 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
+    rule = "weighted_upper" if args.weighted_upper else "native_two_sided"
+    print(f"Shared configuration: {args.detector}/{rule} | 0--30 Hz / 128 bins | seed={args.seed} | {device}", flush=True)
 
     split = out / "hellbridge_split"
     prepare = Path(__file__).resolve().with_name("prepare_hellbridge_paper_split.py")
@@ -187,7 +218,8 @@ def main():
     ).reset_index(drop=True)
     fit, cal, test = hb.development_split(manifest)
     raw = hell_features(args.hell_h5, manifest, read_al40)
-    predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter, args.detector)
+    predictor = fit_group(raw[fit], args.seed, device, hb, CrossSensorAdapter,
+                          args.detector, args.weighted_upper)
     rng = np.random.default_rng(20261119)
     hell_masks = [sensor_mask(40, RATE, rng.permutation(40)) for _ in range(5)]
     rows = []
@@ -217,7 +249,8 @@ def main():
 
         healthy = group[(group.split == "train") & group.label.eq(0)]
         fit, _ = z24.split_training_windows([load(row) for row in healthy.itertuples()])
-        predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter, args.detector)
+        predictor = fit_group(fit, args.seed + index * 1009, device, hb, CrossSensorAdapter,
+                              args.detector, args.weighted_upper)
         for row in group[group.split.eq("test") | (group.split.eq("val") & group.label.eq(0))].itertuples():
             features = load(row)
             scenarios = [("clean", 0, np.ones(len(channels), dtype=bool))]
@@ -249,7 +282,9 @@ def main():
         "seed": args.seed, "sampling_rate_hz": FS, "window_samples": LENGTH,
         "frequency_limit_hz": FREQUENCY_LIMIT, "frequency_bins": BINS,
         "fit": "healthy-only", "detector": args.detector,
-        "score_direction": "two-sided on both bridges",
+        "score_rule": rule,
+        "score_direction": "upper-tail" if args.weighted_upper else "two-sided",
+        "usad_hidden_widths": [512, 256, 64] if args.weighted_upper else None,
         "threshold": "healthy-only clean, fixed across test masks",
         "target_calibration_specificity": SPECIFICITY,
         "evaluation_units": {"HellBridge": "window", "Z24": "record median"},
