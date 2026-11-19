@@ -409,6 +409,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(DEFAULT_SEEDS))
+    parser.add_argument("--repeat-pca", action="store_true", help="Run deterministic PCA for every requested seed")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--raw-window", type=int, default=1024)
@@ -457,7 +458,7 @@ def main():
         "test_used_for_training_selection_or_threshold": False,
         "models": args.models,
         "seeds": args.seeds,
-        "pca_seed_policy": "one deterministic fit",
+        "pca_seed_policy": "repeat deterministic fit" if args.repeat_pca else "one deterministic fit",
     }
     (args.output_dir / "protocol.json").write_text(
         json.dumps(protocol, indent=2), encoding="utf-8",
@@ -469,7 +470,9 @@ def main():
     )
 
     for model_name in args.models:
-        model_seeds = args.seeds[:1] if model_name.startswith("pca_") else args.seeds
+        model_seeds = args.seeds
+        if model_name.startswith("pca_") and not args.repeat_pca:
+            model_seeds = args.seeds[:1]
         for seed in model_seeds:
             run_dir = args.output_dir / "runs" / f"{model_name}__{seed}"
             if (run_dir / "complete.json").exists():
