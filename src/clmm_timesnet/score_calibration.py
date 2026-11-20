@@ -197,22 +197,11 @@ def evaluate(dataset, rows, out, mask_aware=False):
     return pd.DataFrame(results), audit
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--z24-root", required=True, type=Path)
-    parser.add_argument("--hell-h5", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--seed", type=int, default=20270905)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--mask-aware", action="store_true")
-    args = parser.parse_args()
-    out = args.output_dir
-    out.mkdir(parents=True, exist_ok=True)
+def evaluate_hellbridge(args, out, device):
     split = out / "hellbridge_split"
     subprocess.run([sys.executable, "-m", "clmm_timesnet.data.prepare_hellbridge", "--h5", str(args.hell_h5),
                     "--output-dir", str(split), "--profile", "svendsen2022", "--regime", "P2_NM_Z",
                     "--seed", "20261113", "--strict-paper-counts"], check=True)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"HellBridge {args.seed=} {device=}", flush=True)
     manifest = pd.read_csv(split / "sample_manifest.csv").sort_values(["record_id", "start"]).reset_index(drop=True)
     fit, cal, test = development_split(manifest)
@@ -226,11 +215,89 @@ def main():
             score_rows(rows, predict(raw[ids], kept), manifest.loc[ids, "sample_id"],
                        manifest.loc[ids, "label"], role, condition, rep)
     hell, hell_audit = evaluate("HellBridge", rows, out, args.mask_aware)
-    del predict, raw, rows
+    return hell, hell_audit
+
+def diagnose_z24_sensor50(scores, metrics, manifest, channels_by_group, out):
+    condition = "sensor_0.50"
+    keys = ["method", "replicate"]
+    thresholds = metrics.loc[
+        metrics.condition.eq(condition) & metrics.policy.eq("masked_q90"),
+        keys + ["threshold", "sign", "fp"],
+    ]
+    test = scores.loc[
+        scores.condition.eq(condition) & scores.split.eq("test"), keys + ["sample_id", "label", "score"],
+    ]
+    test = test.merge(thresholds, on=keys, validate="many_to_one")
+    metadata = manifest.loc[manifest.split.eq("test"), ["record_id", "setup", "excitation", "label"]]
+    test = test.merge(metadata, left_on=["sample_id", "label"], right_on=["record_id", "label"],
+                      how="left", validate="many_to_one")
+    if test.setup.isna().any() or len(test) != 1320 or test.duplicated(keys + ["sample_id"]).any():
+        raise ValueError("Z24 scores do not match the expected test records")
+    test["oriented_score"] = test.score * test.sign
+    test["margin_q90"] = test.oriented_score - test.threshold
+    test["alarm"] = test.oriented_score.ge(test.threshold)
+    healthy = test[test.label.eq(0)].copy()
+    healthy["dropped_sensors"] = ""
+    for row in healthy.itertuples():
+        labels = channels_by_group[(int(row.setup), row.excitation)]
+        order = stable_rng(str(row.sample_id), "sensor", row.replicate).permutation(len(labels))
+        kept = sensor_mask(len(labels), 0.50, order)
+        healthy.at[row.Index, "dropped_sensors"] = ", ".join(np.asarray(labels)[~kept])
+    by_record = healthy.pivot_table(
+        index=["sample_id", "setup", "excitation"], columns="method", values="alarm", aggfunc="sum",
+    ).reindex(columns=MASK_METHODS).sort_values("mask_aware", ascending=False)
+    details = healthy.loc[healthy.alarm, keys + [
+        "sample_id", "setup", "excitation", "oriented_score", "threshold", "margin_q90", "dropped_sensors",
+    ]].sort_values(["method", "sample_id", "replicate"])
+    overlaps = []
+    for (method, rep), group in test.groupby(keys):
+        normal, damage = group[group.label.eq(0)], group[group.label.eq(1)]
+        worst = normal.loc[normal.oriented_score.idxmax()]
+        false_alarms = int(normal.alarm.sum())
+        if false_alarms != worst.fp:
+            raise ValueError(f"False alarms do not match metrics for {method}/{rep}")
+        overlaps.append(dict(
+            method=method, replicate=rep, highest_healthy=worst.sample_id,
+            false_alarms=false_alarms, recall_q90=damage.alarm.mean(),
+            recall_at_zero_fp=damage.oriented_score.gt(worst.oriented_score).mean(),
+        ))
+    for name, table in (
+        ("false_alarms_by_record", by_record.reset_index()),
+        ("false_alarm_details", details),
+        ("score_overlap_by_mask", pd.DataFrame(overlaps)),
+    ):
+        table.to_csv(out / f"{name}.csv", index=False)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--z24-root", required=True, type=Path)
+    parser.add_argument("--hell-h5", type=Path)
+    parser.add_argument("--z24-only", action="store_true")
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--seed", type=int, default=20270905)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--mask-aware", action="store_true")
+    parser.add_argument("--diagnose-sensor50", action="store_true")
+    args = parser.parse_args()
+    if args.diagnose_sensor50 and not args.mask_aware:
+        parser.error("--diagnose-sensor50 requires --mask-aware")
+    if not args.z24_only and args.hell_h5 is None:
+        parser.error("--hell-h5 is required unless --z24-only is set")
+    out = args.output_dir
+    out.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    bridge_results = []
+    audits = []
+    if not args.z24_only:
+        hell, hell_audit = evaluate_hellbridge(args, out, device)
+        bridge_results.append(hell)
+        audits.append(hell_audit)
 
     manifest = load_manifest(args.z24_root)
     rows = []
-    for index, ((setup, excitation), channels) in enumerate(sorted(stable_sensor_map(manifest).items())):
+    channels_by_group = stable_sensor_map(manifest)
+    for index, ((setup, excitation), channels) in enumerate(sorted(channels_by_group.items())):
         print(f"Z24 {setup=} {excitation=}", flush=True)
         group = manifest[(manifest.setup == setup) & (manifest.excitation == excitation)]
 
@@ -253,7 +320,11 @@ def main():
                     score_rows(rows, scores, [row.record_id], [row.label], "direction", condition, rep)
         del predict
     z24, z24_audit = evaluate("Z24", rows, out, args.mask_aware)
-    result = pd.concat([z24, hell], ignore_index=True).assign(seed=args.seed)
+    if args.diagnose_sensor50:
+        diagnose_z24_sensor50(pd.DataFrame(rows), z24, manifest, channels_by_group, out)
+    bridge_results.insert(0, z24)
+    audits.insert(0, z24_audit)
+    result = pd.concat(bridge_results, ignore_index=True).assign(seed=args.seed)
     result.to_csv(out / "metrics_per_mask.csv", index=False)
     summary = result.groupby(["dataset", "condition", "method", "policy"], as_index=False)[FIELDS].mean()
     summary.to_csv(out / "summary.csv", index=False)
@@ -263,7 +334,7 @@ def main():
         deltas = paired.xs(MASK_METHODS[1], axis=1, level=1) - paired.xs(MASK_METHODS[0], axis=1, level=1)
         deltas.add_prefix("delta_").to_csv(out / "paired_deltas.csv")
     (out / "protocol.json").write_text(json.dumps({
-        "seed": args.seed, "epochs": args.epochs, "orientation": [z24_audit, hell_audit],
+        "seed": args.seed, "epochs": args.epochs, "orientation": audits,
         "mask_matching": {"HellBridge": "same exact sensor indices", "Z24": "same rate and replicate, record-specific indices"},
         "fit": "healthy-only", "mask_aware": args.mask_aware,
         "Z24_direction": ("same labeled clean validation rule applied separately per model"
