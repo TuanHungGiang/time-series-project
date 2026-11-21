@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a two-bridge TimesNet layer diagnostic and failure-mode figure.
+
 - Added a controlled 128/256/512-point HellBridge resolution ablation under clean and 50% sensor-loss conditions.
 
 - Added visual diagnostics for paired TimesNet and mask-aware TimesNet runs on Z24 and HellBridge.
