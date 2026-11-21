@@ -7,3 +7,5 @@ The one-seed code and planned configuration are registered in `experiments/exp00
 The previous root-level workflows are pinned on `archive/pre-clmm-cleanup`. The manuscript baseline runners are referenced in `docs/en/legacy-workflows.md`.
 
 The separate score-calibration diagnostic now renders two-bridge sensor-loss figures with waveform examples, all-mask metric ranges, score overlap, damage-state recall, and Q90 trade-offs. Run the score-calibration command with mask-aware training, then pass its output to the visualization module.
+
+The HellBridge resolution diagnostic compares 128, 256, and 512 points per 1024-sample source window with identical splits and masks. Results are reported overall and by damage state.
