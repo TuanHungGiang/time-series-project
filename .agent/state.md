@@ -9,3 +9,5 @@ The previous root-level workflows are pinned on `archive/pre-clmm-cleanup`. The 
 The separate score-calibration diagnostic now renders two-bridge sensor-loss figures with waveform examples, all-mask metric ranges, score overlap, damage-state recall, and Q90 trade-offs. Run the score-calibration command with mask-aware training, then pass its output to the visualization module.
 
 The HellBridge resolution diagnostic compares 128, 256, and 512 points per 1024-sample source window with identical splits and masks. Results are reported overall and by damage state.
+
+The small TimesNet layer diagnostic reuses one healthy-fit checkpoint per group across native, period-anchored, uniform-period, and untrained cross-prediction scoring. It records activation shifts and renders failure-mode figures for Z24 and HellBridge.
