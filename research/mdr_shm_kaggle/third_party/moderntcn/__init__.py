@@ -1,0 +1,2 @@
+from .ModernTCN import Model
+
