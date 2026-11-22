@@ -1,4 +1,4 @@
-"""TimesNet reconstruction at native 1024-point resolution, with layer logs."""
+"""Native-resolution TimesNet and a controlled availability-embedding ablation."""
 
 import argparse
 import json
@@ -12,18 +12,22 @@ import pandas as pd
 import torch
 from scipy.signal import detrend
 from sklearn.metrics import roc_auc_score
+from torch.utils.data import DataLoader, TensorDataset
 
 from .data.hellbridge import Normalizer, development_split, read_al40
 from .data.masking import sensor_mask, stable_rng
 from .data.z24 import load_manifest, read_stable_vertical, split_training_windows, stable_sensor_map
 from .metrics import publication_metrics, recall_at_fpr, threshold_from_healthy
-from .models.backbone import fit_timesnet, reconstruct, seed_everything
+from .models.backbone import fit_timesnet, reconstruct, seed_everything, timesnet_config
+from .score_calibration import MaskAwareTimesNet
 
 LENGTH = 1024
 MASK_REPS = range(3)
 RATE = 0.50
 SEED = 20270905
 CONDITION = "sensor_0.50"
+METHODS = ("native", "sensor_dropout", "sensor_dropout_mask")
+TRAIN_RATES = (0.0, 0.10, 0.30, 0.50)
 METRICS = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "fp", "recall_low_fpr", "rank_reversal"]
 
 
@@ -54,14 +58,49 @@ def subset(data, count):
     return data[np.linspace(0, len(data) - 1, min(len(data), count), dtype=int)]
 
 
+def fit_with_dropout(fit, args, seed, device, method):
+    channels, length = fit.shape[1:]
+    model = MaskAwareTimesNet(timesnet_config(channels, length)).to(device)
+    model.mask_embedding.requires_grad_(method == "sensor_dropout_mask")
+    loader = DataLoader(TensorDataset(torch.from_numpy(fit)), batch_size=args.batch_size, shuffle=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    rng = np.random.default_rng(seed)
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        losses = []
+        for (batch,) in loader:
+            target = batch.to(device).transpose(1, 2)
+            available = np.stack([
+                sensor_mask(channels, rng.choice(TRAIN_RATES), rng.permutation(channels))
+                for _ in batch
+            ])
+            kept = torch.as_tensor(available, device=device)
+            prediction = model(target, mask=kept.unsqueeze(1))
+            error = (target - prediction).square().mean(dim=1)
+            loss = ((error * kept).sum(1) / kept.sum(1)).mean()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
+            losses.append(loss.detach().item())
+        if epoch in (1, args.epochs) or epoch % 5 == 0:
+            print(f"  {method} epoch={epoch}/{args.epochs} loss={np.mean(losses):.6f}", flush=True)
+    return model.eval().requires_grad_(False)
+
+
 class Detector:
-    def __init__(self, fit, reference, seed, args, device):
+    def __init__(self, fit, reference, seed, args, device, method="native"):
+        self.method = method
         self.device = device
         self.batch_size = args.batch_size
         self.scaler = Normalizer.fit(fit)
         self.full = np.ones(fit.shape[1], dtype=bool)
         seed_everything(seed)
-        self.model = fit_timesnet(self.scaler.transform(fit), args.epochs, self.batch_size, device)
+        fit = self.scaler.transform(fit)
+        if method == "native":
+            self.model = fit_timesnet(fit, args.epochs, self.batch_size, device)
+        else:
+            self.model = fit_with_dropout(fit, args, seed, device, method)
         self.reference_center = 0.0
         self.reference_scale = 1.0
         ref, _ = self.score(self.scaler.transform(reference), self.full)
@@ -87,7 +126,9 @@ class Detector:
 
         handles = []
         if capture:
-            handles.append(self.model.enc_embedding.register_forward_hook(save("embedding", lambda _, a, y: y)))
+            def embedding_input(_layer, inputs):
+                logs.setdefault("embedding", []).append(inputs[0].detach().cpu().numpy())
+            handles.append(self.model.model[0].register_forward_pre_hook(embedding_input))
             for i, block in enumerate(self.model.model, 1):
                 handles.append(block.register_forward_hook(save(f"timesblock_{i}", lambda _, a, y: y)))
                 handles.append(block.register_forward_hook(save(f"fft_bins_{i}", bins)))
@@ -97,7 +138,10 @@ class Detector:
         try:
             for chunk in x.split(self.batch_size):
                 visible = torch.where(mask.view(1, -1, 1), chunk, 0.0)
-                prediction = reconstruct(self.model, visible)
+                if self.method == "native":
+                    prediction = reconstruct(self.model, visible)
+                else:
+                    prediction = self.model(visible.transpose(1, 2), mask=mask.view(1, 1, -1)).transpose(1, 2)
                 errors.append((prediction[:, mask] - chunk[:, mask]).square().mean((1, 2)).cpu().numpy())
         finally:
             for handle in handles:
@@ -132,17 +176,19 @@ def save_scores(rows, metadata, score, split, condition, rep):
                          split=split, condition=condition, replicate=rep, score=float(value)))
 
 
-def evaluate(dataset, rows, drift, out):
+def evaluate(dataset, rows, drift, out, sign=None):
+    out.mkdir(parents=True, exist_ok=True)
     scores = pd.DataFrame(rows)
     group_cols = ["split", "condition", "replicate"]
     if scores.duplicated(group_cols + ["sample_id"]).any() or not np.isfinite(scores.score).all():
         raise ValueError("Invalid scores")
     val = scores[scores.split.eq("val")]
     test = scores[scores.split.eq("test")]
-    sign = 1
-    if dataset == "Z24":
-        clean_val = val[val.condition.eq("clean")]
-        sign = -1 if roc_auc_score(clean_val.label, clean_val.score) < .5 else 1
+    if sign is None:
+        sign = 1
+        if dataset == "Z24":
+            clean_val = val[val.condition.eq("clean")]
+            sign = -1 if roc_auc_score(clean_val.label, clean_val.score) < .5 else 1
     scores["oriented_score"] = scores.score * sign
     scores.to_csv(out / "scores.csv.gz", index=False)
     expected = {0: 6, 1: 126} if dataset == "Z24" else {0: 80, 1: 640}
@@ -186,9 +232,38 @@ def evaluate(dataset, rows, drift, out):
     print(f"=== {dataset} · 1024 · sign={sign} ===", flush=True)
     print(summary.round(4).to_string(index=False), flush=True)
     print(agg[["stage", "measure", "label", "value"]].round(4).to_string(index=False), flush=True)
+    return sign
 
 
-def run_hellbridge(args, out, device):
+def score_group(model, values, metadata, cases, rows, drift, group, reduce_record=False):
+    role = metadata.iloc[0].role if "role" in metadata else metadata.iloc[0].split
+    split = "test" if role.startswith("test") else "val"
+    labels = metadata.label.to_numpy()
+    for condition, rep, kept in cases:
+        score, stages = model.score(values, kept, capture=split == "test")
+        if reduce_record:
+            save_scores(rows, metadata.itertuples(), [np.median(score)], split, condition, rep)
+        else:
+            save_scores(rows, metadata.itertuples(), score, split, condition, rep)
+        if split == "test":
+            if condition == "clean":
+                clean = stages
+            else:
+                window_labels = np.full(len(values), labels[0]) if reduce_record else labels
+                layer_drift(drift, clean, stages, window_labels, group, rep)
+        del stages
+
+
+def finalize_dataset(dataset, results, out):
+    ablation = len(results) > 1
+    sign = None
+    for method, (rows, drift) in results.items():
+        if ablation:
+            print(f"=== {dataset} | {method} ===", flush=True)
+        sign = evaluate(dataset, rows, drift, out / method if ablation else out, sign=sign)
+
+
+def run_hellbridge(args, out, device, methods):
     out.mkdir(exist_ok=True)
     split = out / "split"
     subprocess.run([
@@ -199,32 +274,27 @@ def run_hellbridge(args, out, device):
     manifest = pd.read_csv(split / "sample_manifest.csv").sort_values(["record_id", "start"]).reset_index(drop=True)
     fit, val, test = development_split(manifest)
     raw = load_hellbridge(args.hell_h5, manifest)
-    model = Detector(raw[fit], raw[val], SEED, args, device)
-    values = {role: model.scaler.transform(raw[ids]) for role, ids in [("val", val), ("test", test)]}
-    del raw
     rng = np.random.default_rng(20261119)
-    cases = [("clean", 0, model.full)] + [
+    cases = [("clean", 0, np.ones(40, dtype=bool))] + [
         (CONDITION, rep, sensor_mask(40, RATE, rng.permutation(40))) for rep in MASK_REPS
     ]
-    rows, drift = [], []
-    for condition, rep, kept in cases:
-        for role, ids in [("val", val), ("test", test)]:
-            metadata = manifest.loc[ids]
-            score, stages = model.score(values[role], kept, capture=role == "test")
-            save_scores(rows, metadata.itertuples(), score, role, condition, rep)
-            if role == "test":
-                if condition == "clean":
-                    clean = stages
-                else:
-                    layer_drift(drift, clean, stages, metadata.label, "P2_NM_Z", rep)
-        print(f"HellBridge {condition} mask={rep}", flush=True)
-    evaluate("HellBridge", rows, drift, out)
+    results = {method: ([], []) for method in methods}
+    for method, (rows, drift) in results.items():
+        print(f"HellBridge training {method}", flush=True)
+        model = Detector(raw[fit], raw[val], SEED, args, device, method)
+        for role, ids in (("val", val), ("test", test)):
+            metadata = manifest.loc[ids].assign(role=role)
+            score_group(model, model.scaler.transform(raw[ids]), metadata, cases, rows, drift, "P2_NM_Z")
+            print(f"HellBridge scored {method} {role}", flush=True)
+        del model
+    finalize_dataset("HellBridge", results, out)
 
 
-def run_z24(args, out, device):
+def run_z24(args, out, device, methods):
     out.mkdir(exist_ok=True)
     manifest = load_manifest(args.z24_root).assign(sample_id=lambda f: f.record_id)
-    rows, drift = [], []
+    results = {method: ([], []) for method in methods}
+    limit = args.z24_windows
     for index, ((setup, excitation), channels) in enumerate(sorted(stable_sensor_map(manifest).items())):
         key = f"{setup:02d}/{excitation.upper()}"
         print(f"Z24 {key} group={index + 1}/18 input=[N,{len(channels)},1024]", flush=True)
@@ -232,22 +302,48 @@ def run_z24(args, out, device):
         fit, ref = split_training_windows([
             load_z24(Path(row.path), channels) for row in group[group.split.eq("train")].itertuples()
         ])
-        limit = args.z24_windows
-        model = Detector(subset(fit, limit), subset(ref, limit), SEED + 1009 * index, args, device)
-        for row in group[group.split.isin(["val", "test"])].itertuples():
-            values = model.scaler.transform(subset(load_z24(Path(row.path), channels), limit))
-            score, clean = model.score(values, model.full, capture=row.split == "test")
-            save_scores(rows, [row], [np.median(score)], row.split, "clean", 0)
-            if row.split == "val" and row.label == 1:
-                continue
-            for rep in MASK_REPS:
-                order = stable_rng(str(row.record_id), "sensor", rep).permutation(len(channels))
-                kept = sensor_mask(len(channels), RATE, order)
-                score, stages = model.score(values, kept, capture=row.split == "test")
-                save_scores(rows, [row], [np.median(score)], row.split, CONDITION, rep)
-                if row.split == "test":
-                    layer_drift(drift, clean, stages, np.full(len(values), row.label), key, rep)
-    evaluate("Z24", rows, drift, out)
+        fit, ref = subset(fit, limit), subset(ref, limit)
+        # Build once so every branch sees identical windows and masks.
+        cohorts = []
+        full = np.ones(len(channels), dtype=bool)
+        for idx in group.index[group.split.isin(["val", "test"])]:
+            metadata = group.loc[[idx]]
+            row = metadata.iloc[0]
+            values = subset(load_z24(Path(row.path), channels), limit)
+            cases = [("clean", 0, full)]
+            if row.split == "test" or row.label == 0:
+                for rep in MASK_REPS:
+                    order = stable_rng(str(row.record_id), "sensor", rep).permutation(len(channels))
+                    cases.append((CONDITION, rep, sensor_mask(len(channels), RATE, order)))
+            cohorts.append((metadata, values, cases))
+        for method, (rows, drift) in results.items():
+            print(f"  training {method}", flush=True)
+            model = Detector(fit, ref, SEED + 1009 * index, args, device, method)
+            for metadata, values, cases in cohorts:
+                score_group(model, model.scaler.transform(values), metadata, cases,
+                            rows, drift, key, reduce_record=True)
+            del model
+    finalize_dataset("Z24", results, out)
+
+
+def paired_ablation(out):
+    rows = []
+    for bridge in ("Z24", "HellBridge"):
+        by_method = {
+            method: pd.read_csv(out / bridge / method / "metrics_by_mask.csv")
+            .set_index(["condition", "replicate"])
+            for method in METHODS
+        }
+        fields = ["auc", "recall_low_fpr", "recall", "fpr", "ba", "rank_reversal"]
+        for after, before, contrast in [
+            ("sensor_dropout", "native", "dropout_minus_native"),
+            ("sensor_dropout_mask", "sensor_dropout", "mask_minus_dropout"),
+        ]:
+            if not by_method[after].index.equals(by_method[before].index):
+                raise ValueError(f"Cannot pair different condition/mask IDs on {bridge}")
+            delta = (by_method[after][fields] - by_method[before][fields]).add_prefix("delta_")
+            rows.append(delta.reset_index().assign(dataset=bridge, contrast=contrast))
+    pd.concat(rows, ignore_index=True).to_csv(out / "paired_deltas.csv", index=False)
 
 
 def main():
@@ -258,25 +354,33 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--z24-windows", type=int, default=8)
+    parser.add_argument("--embedding-ablation", action="store_true")
     args = parser.parse_args()
     if min(args.epochs, args.batch_size, args.z24_windows) < 1:
         parser.error("epochs, batch size, and window count must be positive")
+    methods = METHODS if args.embedding_ablation else METHODS[:1]
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     (out / "protocol.json").write_text(json.dumps(dict(
-        model="original TimesNet, native batch-adaptive FFT", seed=SEED, device=str(device),
+        models=list(methods), fft="native batch-adaptive FFT", seed=SEED, device=str(device),
         window_points=LENGTH, detrend="linear", resampling=False, epochs=args.epochs,
         batch_size=args.batch_size, z24_windows=args.z24_windows,
-        mask_reps=list(MASK_REPS), train_sensor_loss=0, test_sensor_loss=[0, RATE],
-        reference="healthy clean only; score orientation selected on Z24 clean validation and upper on HellBridge",
+        mask_reps=list(MASK_REPS), train_sensor_loss={
+            method: ([0] if method == "native" else list(TRAIN_RATES)) for method in methods
+        }, test_sensor_loss=[0, RATE],
+        dropout_loss="MSE on observed channels only, shared by dropout branches",
+        reference="healthy clean only; Z24 native clean validation orientation shared by all branches; HellBridge upper",
     ), indent=2), encoding="utf-8")
-    run_hellbridge(args, out / "HellBridge", device)
-    run_z24(args, out / "Z24", device)
+    run_hellbridge(args, out / "HellBridge", device, methods)
+    run_z24(args, out / "Z24", device, methods)
     combined = pd.concat([
-        pd.read_csv(out / bridge / "summary.csv").assign(dataset=bridge)
-        for bridge in ("Z24", "HellBridge")
+        pd.read_csv((out / bridge / method if args.embedding_ablation else out / bridge) / "summary.csv")
+        .assign(dataset=bridge, method=method)
+        for bridge in ("Z24", "HellBridge") for method in methods
     ], ignore_index=True)
+    if args.embedding_ablation:
+        paired_ablation(out)
     combined.to_csv(out / "summary.csv", index=False)
     print("TIMESNET_NATIVE_1024_PASS", flush=True)
 
