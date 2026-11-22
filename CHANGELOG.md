@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a paired native-resolution ablation of sensor dropout and availability embedding on both bridges.
+
 - Added a native 1024-point TimesNet diagnostic with no resampling for both bridges.
 
 - Added a two-bridge TimesNet layer diagnostic and failure-mode figure.
