@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a native 1024-point TimesNet diagnostic with no resampling for both bridges.
+
 - Added a two-bridge TimesNet layer diagnostic and failure-mode figure.
 
 - Added a controlled 128/256/512-point HellBridge resolution ablation under clean and 50% sensor-loss conditions.
