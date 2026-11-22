@@ -13,3 +13,5 @@ The HellBridge resolution diagnostic compares 128, 256, and 512 points per 1024-
 The small TimesNet layer diagnostic reuses one healthy-fit checkpoint per group across native, period-anchored, uniform-period, and untrained cross-prediction scoring. It records activation shifts and renders failure-mode figures for Z24 and HellBridge.
 
 The native-resolution TimesNet diagnostic preserves all 1024 detrended points and logs activation drift and FFT bin changes under sensor loss on both bridges.
+
+The native 1024-point diagnostic now includes a three-branch ablation that isolates sensor dropout and learnable availability embedding under a common observed-channel loss and matched test masks.
