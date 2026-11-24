@@ -46,6 +46,8 @@ def band_power(raw):
 class MaskPairBlock:
     """A frozen-backbone feature block, fitted only on held-back healthy windows."""
 
+    columns = METHODS
+
     def __init__(self, detector, reference):
         self.detector = detector
         self.reference = detector.scaler.transform(reference)
@@ -126,11 +128,11 @@ def cases(channels, mask_key, replicates):
 
 
 def save_cases(block, raw, metadata, mask_key, args, rows, masks, group, record_level=False, clean_only=False):
-    normalized, ratios = block.prepare(raw)
+    inputs = block.prepare(raw)
     sample_rows = list(metadata.itertuples())
     replicates = () if clean_only else args.replicates
     for condition, rep, kept in cases(raw.shape[1], mask_key, replicates):
-        scores = block.scores(normalized, ratios, kept)
+        scores = block.scores(*inputs, kept=kept)
         if record_level:
             scores = np.median(scores, axis=0, keepdims=True)
         masks.append(dict(group=group, mask_key=mask_key, split=sample_rows[0].split,
@@ -139,10 +141,14 @@ def save_cases(block, raw, metadata, mask_key, args, rows, masks, group, record_
         for row, values in zip(sample_rows, scores, strict=True):
             rows.append(dict(sample_id=row.sample_id, record_id=row.record_id, group=group,
                              split=row.split, state=row.state, label=row.label,
-                             condition=condition, replicate=rep, **dict(zip(METHODS, values, strict=True))))
+                             condition=condition, replicate=rep, **dict(zip(block.columns, values, strict=True))))
 
 
-def run_z24(args, device):
+def fit_mask_pair(fit, reference, seed, args, device, _group):
+    return MaskPairBlock(Detector(fit, reference, seed, args, device), reference)
+
+
+def run_z24(args, device, make_block=fit_mask_pair):
     manifest = load_manifest(args.z24_root).assign(sample_id=lambda f: f.record_id)
     rows, masks, fits = [], [], []
     channel_map = stable_sensor_map(manifest)
@@ -158,18 +164,18 @@ def run_z24(args, device):
         seed = args.seed + 1009 * index
         fits.append(dict(group=group, seed=seed, channels=channels, fit_windows=len(fit),
                          reference_windows=len(ref), healthy_records=train.record_id.to_list()))
-        block = MaskPairBlock(Detector(fit, ref, seed, args, device), ref)
+        block = make_block(fit, ref, seed, args, device, group)
         evaluation = cohort[cohort.split.isin(["val", "test"])]
         for idx, row in evaluation.iterrows():
             raw = subset(load_z24(Path(row.path), channels), args.z24_windows)
             save_cases(block, raw, cohort.loc[[idx]], row.record_id, args, rows, masks, group,
                        record_level=True, clean_only=row.split == "val" and row.label == 1)
-        print(f"  evaluated={len(evaluation)} mask_references={len(block.cache)}", flush=True)
+        print(f"  evaluated={len(evaluation)}", flush=True)
         del block
     return rows, masks, fits
 
 
-def run_hellbridge(args, device, out):
+def run_hellbridge(args, device, out, make_block=fit_mask_pair):
     split = out / "split"
     prepare_hellbridge([
         "--h5", str(args.hell_h5),
@@ -189,7 +195,7 @@ def run_hellbridge(args, device, out):
                  fit_ids=manifest.loc[fit].sample_id.to_list(),
                  reference_ids=manifest.loc[ref].sample_id.to_list())]
     print(f"HellBridge {group} fit={len(fit)} reference={len(ref)} val={len(cal)} test={len(test)}", flush=True)
-    block = MaskPairBlock(Detector(raw[fit], raw[ref], args.seed, args, device), raw[ref])
+    block = make_block(raw[fit], raw[ref], args.seed, args, device, group)
     rows, masks = [], []
     for role, ids in (("val", cal), ("test", test)):
         save_cases(block, raw[ids], manifest.loc[ids].assign(split=role), group, args, rows, masks, group)
@@ -197,11 +203,11 @@ def run_hellbridge(args, device, out):
     return rows, masks, fits
 
 
-def evaluate(dataset, rows, masks, fits, out):
+def evaluate(dataset, rows, masks, fits, out, methods=METHODS, share_native_direction=False):
     out.mkdir(parents=True, exist_ok=True)
     scores = pd.DataFrame(rows)
     key = ["condition", "replicate"]
-    if scores.duplicated([*key, "split", "sample_id"]).any() or not np.isfinite(scores[list(METHODS)]).all().all():
+    if scores.duplicated([*key, "split", "sample_id"]).any() or not np.isfinite(scores[list(methods)]).all().all():
         raise ValueError(f"Invalid scores for {dataset}")
     clean_val = scores.loc[scores.split.eq("val") & scores.condition.eq("clean")]
     # Retain the native Z24 runner's validation-only choice of score direction.
@@ -209,7 +215,8 @@ def evaluate(dataset, rows, masks, fits, out):
     if dataset == "Z24" and roc_auc_score(clean_val.label, clean_val.timesnet_native) < 0.5:
         native_sign = -1
     scores["native_raw"] = scores.timesnet_native
-    scores["timesnet_native"] *= native_sign
+    oriented_methods = list(methods) if share_native_direction else ["timesnet_native"]
+    scores[oriented_methods] *= native_sign
     scores.to_csv(out / "scores.csv.gz", index=False)
     pd.DataFrame(masks).to_csv(out / "masks.csv", index=False)
     (out / "fit_groups.json").write_text(json.dumps(fits, indent=2), encoding="utf-8")
@@ -228,7 +235,7 @@ def evaluate(dataset, rows, masks, fits, out):
         if mask_cal.label.ne(0).any() or set(trial.sample_id) != set(clean.index):
             raise ValueError(f"Invalid calibration labels or test pairing for {dataset}/{condition}/{rep}")
         y = trial.label.to_numpy()
-        for method in METHODS:
+        for method in methods:
             result = trial[method].to_numpy()
             aligned_clean = clean.loc[trial.sample_id, method].to_numpy()
             formerly_correct = aligned_clean[y == 1, None] > aligned_clean[y == 0][None, :]
@@ -237,7 +244,7 @@ def evaluate(dataset, rows, masks, fits, out):
                 threshold = threshold_from_healthy(calibration[method].to_numpy(), 0.90)
                 metrics.append(dict(
                     dataset=dataset, method=method, condition=condition, replicate=rep, policy=policy,
-                    threshold=threshold, score_sign=native_sign if method == "timesnet_native" else 1,
+                    threshold=threshold, score_sign=native_sign if method in oriented_methods else 1,
                     healthy=expected[0], damage=expected[1],
                     fp=int(((result >= threshold) & (y == 0)).sum()), low_fpr_limit=low_fpr,
                     recall_low_fpr=recall_at_fpr(y, result, low_fpr),
