@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a two-bridge CLMM–TimesNet experiment for exact-mask latent normalization and observed spectral pair evidence, with paired ablations at 10/30/50% sensor loss.
+
 - Added per-layer healthy–damage separation metrics to the native TimesNet diagnostic.
 
 - Added native-signal exploratory analysis and sensor-pair plots for Z24 and HellBridge.
