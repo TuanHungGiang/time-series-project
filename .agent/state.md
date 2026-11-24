@@ -21,3 +21,5 @@ The native-signal dataset EDA profiles Z24 by excitation and HellBridge by recor
 The native 1024-point runner now offers an optional fixed activation probe. It reports per-layer AUC and low-FPR recall changes without changing the original TimesNet model.
 
 The CLMM mask-and-pair experiment adds a feature block after TimesBlock 2. It uses exact-mask healthy latent references and observed spectral ratios, with one anomaly score and separate ablations. The runner evaluates both bridges with clean and nested 10/30/50% sensor loss and reports clean-fixed and masked healthy calibration.
+
+The latent ablation separates the effect of an exact-mask healthy center from the effect of an exact-mask scale. It keeps the clean scale for the center-only variant and exports paired comparisons against both latent variants and native TimesNet.
