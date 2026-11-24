@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a paired on/off audit for a learned residual adapter after TimesBlock 2, including class-wise score changes and shifts before and after LayerNorm.
+
 - Added a center-only latent ablation and paired comparisons for the two-bridge TimesNet experiment.
 
 - Added a two-bridge CLMM–TimesNet experiment for exact-mask latent normalization and observed spectral pair evidence, with paired ablations at 10/30/50% sensor loss.
