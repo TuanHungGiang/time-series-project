@@ -174,7 +174,7 @@ def allocate(
     return rows, audit
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--h5", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -183,7 +183,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20261113)
     parser.add_argument("--strict-paper-counts", action="store_true")
     parser.add_argument("--audit-only", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     records = inventory(args.h5, args.regime)
