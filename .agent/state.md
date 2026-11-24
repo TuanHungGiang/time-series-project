@@ -17,3 +17,5 @@ The native-resolution TimesNet diagnostic preserves all 1024 detrended points an
 The native 1024-point diagnostic now includes a three-branch ablation that isolates sensor dropout and learnable availability embedding under a common observed-channel loss and matched test masks.
 
 The native-signal dataset EDA profiles Z24 by excitation and HellBridge by recording state. It exports waveform, Welch spectrum, surviving sensor-pair visuals, and record-level descriptive statistics without fitting a detector.
+
+The native 1024-point runner now offers an optional fixed activation probe. It reports per-layer AUC and low-FPR recall changes without changing the original TimesNet model.
