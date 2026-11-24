@@ -19,3 +19,5 @@ The native 1024-point diagnostic now includes a three-branch ablation that isola
 The native-signal dataset EDA profiles Z24 by excitation and HellBridge by recording state. It exports waveform, Welch spectrum, surviving sensor-pair visuals, and record-level descriptive statistics without fitting a detector.
 
 The native 1024-point runner now offers an optional fixed activation probe. It reports per-layer AUC and low-FPR recall changes without changing the original TimesNet model.
+
+The CLMM mask-and-pair experiment adds a feature block after TimesBlock 2. It uses exact-mask healthy latent references and observed spectral ratios, with one anomaly score and separate ablations. The runner evaluates both bridges with clean and nested 10/30/50% sensor loss and reports clean-fixed and masked healthy calibration.
