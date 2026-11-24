@@ -20,7 +20,10 @@ from .timesnet_native_1024 import Detector, LENGTH, SEED, load_hellbridge, load_
 # Use shared bands within the Z24 antialiasing cutoff.
 BANDS = ((1, 4), (4, 8), (8, 16), (16, 22), (22, 30))
 RATES = (0.10, 0.30, 0.50)
-METHODS = ("timesnet_native", "latent_clean_ref", "latent_matched_ref", "spectral_pairs", "clmm_mask_pair")
+METHODS = (
+    "timesnet_native", "latent_clean_ref", "latent_matched_center",
+    "latent_matched_ref", "spectral_pairs", "clmm_mask_pair",
+)
 FIELDS = ("auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_low_fpr", "rank_reversal")
 
 
@@ -96,7 +99,9 @@ class MaskPairBlock:
         (center, scale), valid, (pair_center, pair_scale) = self.reference_for(kept)
         clean_center, clean_scale = self.clean_latent
         clean_latent = (latent - clean_center) / clean_scale
-        matched_latent = (latent - center) / scale
+        centered_latent = latent - center
+        matched_center_latent = centered_latent / clean_scale
+        matched_latent = centered_latent / scale
         pooled_pairs = self.pool_pairs(ratios, valid)
         pair_features = (pooled_pairs - pair_center) / pair_scale
         # One weighted deviation head over the latent and spectral features.
@@ -105,6 +110,7 @@ class MaskPairBlock:
         pair_distance = np.maximum(pair_features, 0.0).mean(axis=1)
         clmm_score = 0.5 * (latent_distance + pair_distance)
         return np.stack((native, np.abs(clean_latent).mean(axis=1),
+                         np.abs(matched_center_latent).mean(axis=1),
                          latent_distance, pair_distance, clmm_score), axis=1)
 
     def prepare(self, raw):
@@ -243,6 +249,19 @@ def evaluate(dataset, rows, masks, fits, out):
     return table
 
 
+def method_deltas(metrics, method, comparators):
+    pairing = ["dataset", "condition", "replicate", "policy"]
+    candidate = metrics.loc[metrics.method.eq(method)].set_index(pairing)
+    deltas = []
+    for comparator in comparators:
+        baseline = metrics.loc[metrics.method.eq(comparator)].set_index(pairing)
+        if not baseline.index.equals(candidate.index):
+            raise ValueError(f"Different mask indices for {method} and {comparator}")
+        delta = candidate[list(FIELDS)] - baseline[list(FIELDS)]
+        deltas.append(delta.add_prefix("delta_").reset_index().assign(comparator=comparator))
+    return pd.concat(deltas, ignore_index=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--z24-root", type=Path, required=True)
@@ -274,6 +293,11 @@ def main():
         score_orientation="upper for the new heads and native HellBridge; native Z24 chooses direction "
                           "from clean labeled validation as in the previous benchmark",
         reference="held-back healthy, exact mask for latent and matching available pairs",
+        latent_ablation=dict(
+            latent_clean_ref="clean center, clean scale",
+            latent_matched_center="exact-mask center, clean scale",
+            latent_matched_ref="exact-mask center, exact-mask scale",
+        ),
         head="equal total latent/pair weight; two-sided latent distance, upper pair deviations",
         calibration="90th percentile of clean or condition-matched healthy validation scores",
         fft="native TimesNet batch-adaptive FFT; evaluation batches of at most batch_size",
@@ -289,16 +313,10 @@ def main():
     groups = ["dataset", "method", "condition", "policy"]
     summary = all_metrics.groupby(groups, sort=False)[list(FIELDS)].mean().reset_index()
     summary.to_csv(out / "summary.csv", index=False)
-    pairing = ["dataset", "condition", "replicate", "policy"]
-    candidate = all_metrics.loc[all_metrics.method.eq("clmm_mask_pair")].set_index(pairing)
-    deltas = []
-    for comparator in METHODS[:-1]:
-        baseline = all_metrics.loc[all_metrics.method.eq(comparator)].set_index(pairing)
-        if not baseline.index.equals(candidate.index):
-            raise ValueError("Different mask indices between proposed method and baseline")
-        delta = candidate[list(FIELDS)] - baseline[list(FIELDS)]
-        deltas.append(delta.add_prefix("delta_").reset_index().assign(comparator=comparator))
-    pd.concat(deltas, ignore_index=True).to_csv(out / "paired_deltas.csv", index=False)
+    method_deltas(all_metrics, "clmm_mask_pair", METHODS[:-1]).to_csv(out / "paired_deltas.csv", index=False)
+    method_deltas(all_metrics, "latent_matched_center", (
+        "latent_clean_ref", "latent_matched_ref", "timesnet_native",
+    )).to_csv(out / "latent_center_deltas.csv", index=False)
     print(summary.loc[summary.policy.eq("clean_q90")].round(4).to_string(index=False), flush=True)
     print(f"CLMM_MASK_PAIR_PASS output={out}", flush=True)
 
