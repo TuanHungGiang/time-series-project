@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added native-signal exploratory analysis and sensor-pair plots for Z24 and HellBridge.
+
 - Added a paired native-resolution ablation of sensor dropout and availability embedding on both bridges.
 
 - Added a native 1024-point TimesNet diagnostic with no resampling for both bridges.
