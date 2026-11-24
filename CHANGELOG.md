@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added per-layer healthy–damage separation metrics to the native TimesNet diagnostic.
+
 - Added native-signal exploratory analysis and sensor-pair plots for Z24 and HellBridge.
 
 - Added a paired native-resolution ablation of sensor dropout and availability embedding on both bridges.
