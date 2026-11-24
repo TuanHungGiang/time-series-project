@@ -28,6 +28,7 @@ SEED = 20270905
 CONDITION = "sensor_0.50"
 METHODS = ("native", "sensor_dropout", "sensor_dropout_mask")
 TRAIN_RATES = (0.0, 0.10, 0.30, 0.50)
+PROBE_STAGES = ("embedding", "timesblock_1", "timesblock_2", "projection")
 METRICS = ["auc", "ap", "ba", "recall", "fpr", "precision", "f1", "fp", "recall_low_fpr", "rank_reversal"]
 
 
@@ -103,7 +104,15 @@ class Detector:
             self.model = fit_with_dropout(fit, args, seed, device, method)
         self.reference_center = 0.0
         self.reference_scale = 1.0
-        ref, _ = self.score(self.scaler.transform(reference), self.full)
+        ref, activations = self.score(self.scaler.transform(reference), self.full, capture=args.layer_probe)
+        self.probe_reference = {}
+        for name in PROBE_STAGES:
+            if name in activations:
+                features = stage_features(activations[name])
+                center = np.median(features, axis=0)
+                mad = 1.4826 * np.median(np.abs(features - center), axis=0)
+                scale = np.maximum(np.maximum(mad, 0.25 * features.std(axis=0)), 1e-3)
+                self.probe_reference[name] = (center, scale)
         self.reference_center = np.median(ref)
         self.reference_scale = max(1.4826 * np.median(np.abs(ref - self.reference_center)),
                                    0.25 * ref.std(), 1e-4)
@@ -150,6 +159,51 @@ class Detector:
         return (scores - self.reference_center) / self.reference_scale, {
             name: np.concatenate(parts) for name, parts in logs.items()
         }
+
+
+def stage_features(activation):
+    mean = activation.mean(axis=1, dtype=np.float64)
+    log_std = np.log(np.maximum(activation.std(axis=1, dtype=np.float64), 1e-6))
+    return np.concatenate((mean, log_std), axis=1)
+
+
+def probe_layer_scores(activations, reference):
+    return {
+        name: np.abs((stage_features(activations[name]) - center) / scale).mean(axis=1)
+        for name, (center, scale) in reference.items()
+    }
+
+
+def evaluate_layer_probes(dataset, rows, out):
+    table = pd.DataFrame(rows)
+    keys = ["stage", "condition", "replicate", "sample_id"]
+    if table.duplicated(keys).any() or not np.isfinite(table.score).all():
+        raise ValueError("Invalid layer probe scores")
+    measures = []
+    expected = {0: 6, 1: 126} if dataset == "Z24" else {0: 80, 1: 640}
+    low_fpr = 0.0 if dataset == "Z24" else 0.05
+    for (stage, condition, rep), group in table.groupby(keys[:-1]):
+        if group.label.value_counts().to_dict() != expected:
+            raise ValueError(f"Unexpected layer probe cohort for {dataset}/{stage}/{condition}/{rep}")
+        measures.append(dict(
+            stage=stage, condition=condition, replicate=rep, auc=roc_auc_score(group.label, group.score),
+            recall_low_fpr=recall_at_fpr(group.label, group.score, low_fpr),
+        ))
+    metrics = pd.DataFrame(measures)
+    if len(metrics) != len(PROBE_STAGES) * (1 + len(MASK_REPS)):
+        raise ValueError(f"Incomplete layer probe results for {dataset}")
+    metrics.to_csv(out / "layer_probe_metrics_by_mask.csv", index=False)
+    table.to_csv(out / "layer_probe_scores.csv.gz", index=False)
+    fields = ["auc", "recall_low_fpr"]
+    means = metrics.groupby(["stage", "condition"])[fields].mean().unstack("condition")
+    summary = means.xs("clean", level="condition", axis=1).add_prefix("clean_").join(
+        means.xs(CONDITION, level="condition", axis=1).add_prefix("masked_")
+    ).reindex(PROBE_STAGES)
+    for field in fields:
+        summary[f"delta_{field}"] = summary[f"masked_{field}"] - summary[f"clean_{field}"]
+    summary.to_csv(out / "layer_probe_summary.csv")
+    print(f"=== {dataset} | frozen activation probe ===", flush=True)
+    print(summary.round(4).to_string(), flush=True)
 
 
 def layer_drift(rows, clean, masked, labels, group, rep):
@@ -235,7 +289,7 @@ def evaluate(dataset, rows, drift, out, sign=None):
     return sign
 
 
-def score_group(model, values, metadata, cases, rows, drift, group, reduce_record=False):
+def score_group(model, values, metadata, cases, rows, drift, group, reduce_record=False, probe_rows=None):
     role = metadata.iloc[0].role if "role" in metadata else metadata.iloc[0].split
     split = "test" if role.startswith("test") else "val"
     labels = metadata.label.to_numpy()
@@ -246,6 +300,12 @@ def score_group(model, values, metadata, cases, rows, drift, group, reduce_recor
         else:
             save_scores(rows, metadata.itertuples(), score, split, condition, rep)
         if split == "test":
+            if probe_rows is not None:
+                for name, values_by_window in probe_layer_scores(stages, model.probe_reference).items():
+                    values_by_sample = [np.median(values_by_window)] if reduce_record else values_by_window
+                    probe_rows.extend(dict(stage=name, condition=condition, replicate=rep, sample_id=uid,
+                                           label=int(label), score=float(probe))
+                                      for uid, label, probe in zip(metadata.sample_id, labels, values_by_sample, strict=True))
             if condition == "clean":
                 clean = stages
             else:
@@ -279,21 +339,26 @@ def run_hellbridge(args, out, device, methods):
         (CONDITION, rep, sensor_mask(40, RATE, rng.permutation(40))) for rep in MASK_REPS
     ]
     results = {method: ([], []) for method in methods}
+    probe_rows = [] if args.layer_probe else None
     for method, (rows, drift) in results.items():
         print(f"HellBridge training {method}", flush=True)
         model = Detector(raw[fit], raw[val], SEED, args, device, method)
         for role, ids in (("val", val), ("test", test)):
             metadata = manifest.loc[ids].assign(role=role)
-            score_group(model, model.scaler.transform(raw[ids]), metadata, cases, rows, drift, "P2_NM_Z")
+            score_group(model, model.scaler.transform(raw[ids]), metadata, cases,
+                        rows, drift, "P2_NM_Z", probe_rows=probe_rows)
             print(f"HellBridge scored {method} {role}", flush=True)
         del model
     finalize_dataset("HellBridge", results, out)
+    if probe_rows is not None:
+        evaluate_layer_probes("HellBridge", probe_rows, out)
 
 
 def run_z24(args, out, device, methods):
     out.mkdir(exist_ok=True)
     manifest = load_manifest(args.z24_root).assign(sample_id=lambda f: f.record_id)
     results = {method: ([], []) for method in methods}
+    probe_rows = [] if args.layer_probe else None
     limit = args.z24_windows
     for index, ((setup, excitation), channels) in enumerate(sorted(stable_sensor_map(manifest).items())):
         key = f"{setup:02d}/{excitation.upper()}"
@@ -321,9 +386,11 @@ def run_z24(args, out, device, methods):
             model = Detector(fit, ref, SEED + 1009 * index, args, device, method)
             for metadata, values, cases in cohorts:
                 score_group(model, model.scaler.transform(values), metadata, cases,
-                            rows, drift, key, reduce_record=True)
+                            rows, drift, key, reduce_record=True, probe_rows=probe_rows)
             del model
     finalize_dataset("Z24", results, out)
+    if probe_rows is not None:
+        evaluate_layer_probes("Z24", probe_rows, out)
 
 
 def paired_ablation(out):
@@ -354,7 +421,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--z24-windows", type=int, default=8)
-    parser.add_argument("--embedding-ablation", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--embedding-ablation", action="store_true")
+    mode.add_argument("--layer-probe", action="store_true")
     args = parser.parse_args()
     if min(args.epochs, args.batch_size, args.z24_windows) < 1:
         parser.error("epochs, batch size, and window count must be positive")
@@ -370,6 +439,8 @@ def main():
             method: ([0] if method == "native" else list(TRAIN_RATES)) for method in methods
         }, test_sensor_loss=[0, RATE],
         dropout_loss="MSE on observed channels only, shared by dropout branches",
+        layer_probe=("Per-stage mean/log-std distance to clean held-out healthy reference"
+                     if args.layer_probe else None),
         reference="healthy clean only; Z24 native clean validation orientation shared by all branches; HellBridge upper",
     ), indent=2), encoding="utf-8")
     run_hellbridge(args, out / "HellBridge", device, methods)
