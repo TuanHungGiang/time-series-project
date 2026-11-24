@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a matched scoring-head trial using sensor-level reconstruction gains from the residual adapter, with paired controls and healthy-only gain references.
+
 - Added a paired on/off audit for a learned residual adapter after TimesBlock 2, including class-wise score changes and shifts before and after LayerNorm.
 
 - Added a center-only latent ablation and paired comparisons for the two-bridge TimesNet experiment.
