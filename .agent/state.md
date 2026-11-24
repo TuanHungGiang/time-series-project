@@ -25,3 +25,5 @@ The CLMM mask-and-pair experiment adds a feature block after TimesBlock 2. It us
 The latent ablation separates the effect of an exact-mask healthy center from the effect of an exact-mask scale. It keeps the clean scale for the center-only variant and exports paired comparisons against both latent variants and native TimesNet.
 
 The post-TimesBlock 2 audit compares a healthy-trained residual adapter against the unchanged TimesNet checkpoint on both bridges. It measures changes before and after LayerNorm, reconstruction error by class, paired ranking flips, and the clean identity condition.
+
+The post-block scoring trial keeps the fitted adapter and compares its original reconstruction score with a single score that also reads sensor-level reconstruction gains. Healthy reference masks fit the gain distribution. The existing score direction is shared by all three branches and the clean score is exactly preserved.
