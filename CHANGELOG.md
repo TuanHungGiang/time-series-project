@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a resumable two-bridge baseline sweep for single and cumulative sensor removal, with per-seed metrics and scientific figures.
+
 - Added a paired USAD transfer trial for the CLMM residual adapter and gain-based score on both bridges.
 
 - Added a matched scoring-head trial using sensor-level reconstruction gains from the residual adapter, with paired controls and healthy-only gain references.
