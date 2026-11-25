@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Save targeted baseline checkpoints before scoring and export reproducible figures, plot data and per-seed Kaggle reports.
+
 - Added a resumable two-bridge baseline sweep for single and cumulative sensor removal, with per-seed metrics and scientific figures.
 
 - Added a paired USAD transfer trial for the CLMM residual adapter and gain-based score on both bridges.

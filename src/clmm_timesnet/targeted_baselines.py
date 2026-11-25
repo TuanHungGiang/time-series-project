@@ -14,8 +14,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import roc_auc_score
-
+from . import targeted_artifacts as artifacts
+from . import targeted_checkpoints as checkpoints
 from .data.hellbridge import Normalizer, development_split, load_windows
 from .data.prepare_hellbridge import main as prepare_hellbridge
 from .data.z24 import load_manifest, read_stable_vertical, record_windows, split_training_windows, stable_sensor_map
@@ -38,6 +38,7 @@ class Group:
     values: np.ndarray
     metadata: pd.DataFrame
     counts: list
+    normalizer: Normalizer
 
 
 def limit_windows(array, limit):
@@ -64,8 +65,10 @@ def load_z24(root, limit):
             normalizer.transform(limit_windows(train, limit)),
             normalizer.transform(limit_windows(reference, limit)),
             normalizer.transform(np.concatenate(arrays)),
-            evaluation[["record_id", "split", "label"]].rename(columns={"record_id": "sample_id"}).reset_index(drop=True),
+            evaluation[["record_id", "split", "label", "state", "path"]]
+            .assign(sample_id=evaluation.record_id).reset_index(drop=True),
             [len(array) for array in arrays],
+            normalizer,
         )
 
 
@@ -75,12 +78,18 @@ def load_hellbridge(path, out, fit_limit):
     manifest = pd.read_csv(split / "sample_manifest.csv").sort_values(["record_id", "start"]).reset_index(drop=True)
     train, calibration, test = development_split(manifest)
     raw = load_windows(path, manifest, 128)
-    values = Normalizer.fit(raw[train]).transform(raw)
+    normalizer = Normalizer.fit(raw[train])
+    values = normalizer.transform(raw)
+    manifest["benchmark_split"] = ""
+    for role, indices in (("train", train), ("val", calibration), ("test", test)):
+        manifest.loc[indices, "benchmark_split"] = role
+    atomic_csv(manifest, out / "split_membership.csv")
     metadata = pd.concat([manifest.loc[calibration].assign(split="val"),
                           manifest.loc[test].assign(split="test")])
     return Group("P2_NM_Z", [f"AL{i:02d}/z" for i in range(1, 41)], limit_windows(values[train], fit_limit),
                  values[calibration], values[metadata.index],
-                 metadata[["sample_id", "split", "label"]].reset_index(drop=True), [1] * len(metadata))
+                 metadata[["sample_id", "split", "label", "record_id", "state", "start", "stop"]]
+                 .reset_index(drop=True), [1] * len(metadata), normalizer)
 
 
 def dropped(values, indices):
@@ -114,7 +123,8 @@ def archive_functions(directory):
     sys.path.insert(0, str(directory))
     from run_z24_missingness_baselines import fit_scorer
     from run_z24_source_baselines import aggregate_record_scores, robust_score_reference, threshold_from_labeled_validation
-    return fit_scorer, aggregate_record_scores, robust_score_reference, threshold_from_labeled_validation
+    import run_hellbridge_source_baselines as source
+    return fit_scorer, aggregate_record_scores, robust_score_reference, threshold_from_labeled_validation, source
 
 
 def atomic_csv(table, path):
@@ -123,59 +133,55 @@ def atomic_csv(table, path):
     tmp.replace(path)
 
 
-def fit_model(fit_scorer, model, values, epochs, batch_size, device):
-    if model != "scatterad":
-        return fit_scorer(model, values, epochs, batch_size, device)
-    from run_hellbridge_source_baselines import fit_scatterad, score_scatterad
-    network, graph = fit_scatterad(values, epochs, device)
-
-    @torch.no_grad()
-    def score(samples):
-        score_parts = []
-        for batch in torch.from_numpy(samples).split(batch_size):
-            size, channels, length = batch.shape
-            x = batch.to(device).transpose(1, 2).reshape(size * length, channels)
-            edges = (graph[None] + (torch.arange(size, device=device) * length)[:, None, None])
-            edges = edges.transpose(0, 1).reshape(2, -1)
-            encoder = network.model.online_encoder
-            hidden, _ = encoder(x, edges)
-            hidden = hidden.reshape(size, length, -1)
-            delta = (hidden[:, 1:] - hidden[:, :-1]).square().mean(-1)
-            temporal = torch.nn.functional.pad(delta, (0, 1))
-            centers = network.model.center.unsqueeze(0).expand(size, -1, -1)
-            distance = torch.cdist(hidden, centers).min(dim=-1).values
-            score_parts.append((distance + temporal).mean(1).cpu().numpy())
-        return np.concatenate(score_parts)
-
-    check = values[:min(3, len(values))]
-    np.testing.assert_allclose(score(check), score_scatterad((network, graph), check, device),
-                               rtol=5e-5, atol=5e-6)
-    return score
+def condition_plan(dataset, sensors, order):
+    yield "clean", "0", []
+    for index, sensor in enumerate(sensors):
+        yield "single", sensor, [index]
+    for step in range(1, len(order)):
+        yield "cumulative", str(step), order[:step]
+    if dataset == "Z24":
+        for step in range(1, len(Z24_EXAMPLE) + 1):
+            labels = Z24_EXAMPLE[:step]
+            removed = [i for i, label in enumerate(sensors) if label in labels]
+            if removed:
+                yield "example", "+".join(labels), removed
 
 
-def group_scores(dataset, group, order, args, functions, model, seed, index, device, path):
-    fit_scorer, aggregate, reference, _ = functions
-    if path.is_file():
+def group_scores(dataset, group, order, args, functions, model, seed, index, device, path, checkpoint):
+    _, aggregate, reference, _, source = functions
+    traces = path.with_name(f"{group.name}_window_traces.npz")
+    if path.is_file() and traces.is_file() and checkpoint.is_file() and checkpoint.with_suffix(".json").is_file():
         return pd.read_csv(path, dtype={"key": str})
-    seed_everything(seed + (1009 * index if dataset == "Z24" else 0))
-    print(f"{dataset} {model} seed={seed} group={group.name}", flush=True)
-    scorer = fit_model(fit_scorer, model, group.train, args.epochs, args.batch_size, device)
-    norm = reference(scorer(group.reference)) if dataset == "Z24" else None
+    effective_seed = seed + (1009 * index if dataset == "Z24" else 0)
+    seed_everything(effective_seed)
+    if checkpoint.is_file():
+        package, scorer = checkpoints.load_checkpoint(checkpoint, source, device)
+        meta = package["metadata"]
+        if (meta["protocol"] != args.protocol or meta["model"] != model or meta["seed"] != seed
+                or meta["dataset"] != dataset or meta["group"] != group.name
+                or meta["sensors"] != group.sensors):
+            raise ValueError(f"Incompatible checkpoint {checkpoint}")
+        np.testing.assert_array_equal(package["normalizer_mean"].numpy(), group.normalizer.mean)
+        np.testing.assert_array_equal(package["normalizer_scale"].numpy(), group.normalizer.scale)
+        checkpoints.verify_checkpoint(package, scorer)
+        checkpoints.write_json(checkpoint.with_suffix(".json"), meta)
+        norm = meta["healthy_score_reference"]
+        del package
+        print(f"RELOAD {dataset}/{model}/{seed}/{group.name}", flush=True)
+    else:
+        print(f"{dataset} {model} seed={seed} group={group.name}", flush=True)
+        scorer = checkpoints.fit_scorer(source, model, group.train, args.epochs, args.batch_size, device)
+        norm = reference(scorer(group.reference)) if dataset == "Z24" else None
+        checkpoints.write_checkpoint(checkpoint, scorer, group, dataset, seed, effective_seed, args.epochs,
+                                     norm, args.protocol)
     n_val = int(group.metadata.split.eq("val").sum())
     offset = sum(group.counts[:n_val])
     test = group.metadata.iloc[n_val:].reset_index(drop=True)
     arrays = []
-    steps = [("clean", "0", [])]
-    steps += [("single", sensor, [i]) for i, sensor in enumerate(group.sensors)]
-    steps += [("cumulative", str(k), order[:k]) for k in range(1, len(order))]
-    if dataset == "Z24":
-        for step in range(1, len(Z24_EXAMPLE) + 1):
-            labels = Z24_EXAMPLE[:step]
-            indices = [i for i, label in enumerate(group.sensors) if label in labels]
-            if indices:
-                steps.append(("example", "+".join(labels), indices))
-    cache = {}
-    for design, key, removed in steps:
+    cache, trace_scores = {}, {}
+    midpoint = max(1, len(order) // 2)
+    trace_keys = {(): "clean", tuple(sorted(order[:midpoint])): "cumulative_local_midpoint"}
+    for design, key, removed in condition_plan(dataset, group.sensors, order):
         mask = tuple(sorted(removed))
         if mask not in cache:
             if mask:
@@ -188,15 +194,25 @@ def group_scores(dataset, group, order, args, functions, model, seed, index, dev
             expected = len(group.values) - (offset if mask else 0)
             if score.shape != (expected,) or not np.isfinite(score).all():
                 raise ValueError(f"Invalid {dataset}/{group.name}/{model}/{seed}/{design}/{key} scores")
+            if mask in trace_keys:
+                trace_scores[trace_keys[mask]] = score if mask else score[offset:]
             counts = group.counts if not mask else group.counts[n_val:]
             if dataset == "Z24":
                 upper, two_sided = aggregate(score, counts, norm)
                 cache[mask] = dict(upper=upper, lower=-np.asarray(upper), two_sided=two_sided)
             else:
                 cache[mask] = dict(upper=score, lower=-score, two_sided=np.abs(score))
-        metadata = test if mask else group.metadata
+        metadata = (test if mask else group.metadata).drop(columns="path", errors="ignore")
         arrays.append(metadata.assign(group=group.name, design=design, key=key, removed=len(mask), **cache[mask]))
     result = pd.concat(arrays, ignore_index=True)
+    temporary = traces.with_suffix(".tmp")
+    with temporary.open("wb") as handle:
+        np.savez_compressed(
+            handle, **trace_scores, sample_id=test.sample_id.to_numpy(dtype=str), label=test.label.to_numpy(),
+            window_offsets=np.r_[0, np.cumsum(group.counts[n_val:])], sensors=np.array(group.sensors),
+            removed_indices=order[:midpoint], model_hz=50 if dataset == "Z24" else 12.5,
+        )
+    temporary.replace(traces)
     atomic_csv(result, path)
     return result
 
@@ -323,6 +339,14 @@ def summarize(out, dataset, paths):
 def run_dataset(dataset, groups, args, out, device, functions):
     out.mkdir(parents=True, exist_ok=True)
     orders = build_plan(groups, functions[0], out)
+    artifacts.export_inputs(dataset, groups, orders, args, out)
+    mask_rows = []
+    for group in groups:
+        for design, key, removed in condition_plan(dataset, group.sensors, orders[group.name]):
+            mask_rows.append(dict(group=group.name, design=design, key=key, removed=len(removed),
+                                  removed_sensors=" ".join(group.sensors[i] for i in removed),
+                                  retained_sensors=" ".join(s for i, s in enumerate(group.sensors) if i not in removed)))
+    atomic_csv(pd.DataFrame(mask_rows), out / "mask_manifest.csv")
     max_steps = {g.name: len(g.sensors) - 1 for g in groups}
     files = []
     for model in args.models:
@@ -331,18 +355,30 @@ def run_dataset(dataset, groups, args, out, device, functions):
             run = out / "runs" / f"{model}__{seed}"
             run.mkdir(parents=True, exist_ok=True)
             metrics = run / "metrics.csv"
+            weights = args.weights_dir / dataset / run.name
+            paths = [weights / f"{group.name}.pt" for group in groups]
             files.append(metrics)
-            if metrics.is_file():
+            if metrics.is_file() and (weights / "calibration.json").is_file() and all(
+                path.is_file() and path.with_suffix(".json").is_file()
+                and (run / f"{path.stem}_window_traces.npz").is_file() for path in paths
+            ):
                 print(f"SKIP {dataset}/{model}/{seed}", flush=True)
                 continue
             frame = pd.concat([
                 group_scores(dataset, group, orders[group.name], args, functions, model, seed, index, device,
-                             run / f"{group.name}.csv.gz")
+                             run / f"{group.name}.csv.gz", paths[index])
                 for index, group in enumerate(groups)
             ], ignore_index=True)
             result = evaluate(dataset, frame, max_steps, functions[3]).assign(model=model, seed=seed)
+            calibration = dict(score_tail=result.score_tail.iloc[0], threshold=float(result.threshold.iloc[0]),
+                               healthy_quantile=0.90, score_unit="record" if dataset == "Z24" else "window")
+            checkpoints.write_json(weights / "calibration.json", calibration)
+            artifacts.export_scores(frame, max_steps, calibration, run)
             atomic_csv(result, metrics)
             print(f"DONE {dataset}/{model}/{seed}", flush=True)
+    artifacts.export_checkpoint_index(dataset, out, args.weights_dir, files, groups)
+    artifacts.plot_discrimination(dataset, out, files)
+    artifacts.export_timesnet_probe(dataset, out, args.weights_dir, files, functions[4])
     return summarize(out, dataset, files)
 
 
@@ -352,6 +388,7 @@ def main():
     parser.add_argument("--hell-h5", type=Path, required=True)
     parser.add_argument("--baseline-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--weights-dir", type=Path)
     parser.add_argument("--datasets", nargs="+", choices=("Z24", "HellBridge"), default=["Z24", "HellBridge"])
     parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS))
@@ -367,6 +404,7 @@ def main():
         from torch_geometric.nn import GATConv  # noqa: F401
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    args.weights_dir = args.weights_dir or out / "weights"
     source_files = ("run_z24_missingness_baselines.py", "run_z24_source_baselines.py",
                     "run_hellbridge_source_baselines.py", "run_hellbridge_tsad_baselines.py")
     paths = [args.baseline_dir / name for name in source_files]
@@ -375,7 +413,7 @@ def main():
     for path in paths:
         source_hash.update(path.relative_to(args.baseline_dir).as_posix().encode())
         source_hash.update(path.read_bytes().replace(b"\r\n", b"\n"))
-    protocol = dict(version=1, z24_root=str(args.z24_root), hell_h5=str(args.hell_h5), epochs=args.epochs,
+    protocol = dict(version=2, z24_root=str(args.z24_root), hell_h5=str(args.hell_h5), epochs=args.epochs,
                     batch_size=args.batch_size, smoke_window_limit=args.smoke_window_limit,
                     baseline_source_sha256=source_hash.hexdigest(),
                     training="healthy clean only; checkpoint reused across masks",
@@ -394,7 +432,13 @@ def main():
     protocol_file = out / "protocol.json"
     if protocol_file.is_file() and json.loads(protocol_file.read_text(encoding="utf-8")) != protocol:
         raise RuntimeError("Output directory contains a different protocol. Use a fresh output path.")
-    protocol_file.write_text(json.dumps(protocol, indent=2), encoding="utf-8")
+    checkpoints.write_json(protocol_file, protocol)
+    args.weights_dir.mkdir(parents=True, exist_ok=True)
+    weights_protocol = args.weights_dir / "protocol.json"
+    if weights_protocol.is_file() and json.loads(weights_protocol.read_text(encoding="utf-8")) != protocol:
+        raise RuntimeError("Weights directory contains a different protocol. Use a fresh weights path.")
+    checkpoints.write_json(weights_protocol, protocol)
+    args.protocol = protocol
     functions = archive_functions(args.baseline_dir)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     summaries = []
