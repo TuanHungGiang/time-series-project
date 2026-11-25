@@ -203,23 +203,24 @@ def run_hellbridge(args, device, out, make_block=fit_mask_pair):
     return rows, masks, fits
 
 
-def native_score_direction(dataset, scores):
-    # Retain the native Z24 runner's validation-only choice of score direction.
+def native_score_direction(dataset, scores, baseline_method="timesnet_native"):
+    # Retain the Z24 runner's validation-only choice of score direction.
     if dataset == "Z24":
         clean_val = scores.loc[scores.split.eq("val") & scores.condition.eq("clean")]
-        return -1 if roc_auc_score(clean_val.label, clean_val.timesnet_native) < 0.5 else 1
+        return -1 if roc_auc_score(clean_val.label, clean_val[baseline_method]) < 0.5 else 1
     return 1
 
 
-def evaluate(dataset, rows, masks, fits, out, methods=METHODS, share_native_direction=False):
+def evaluate(dataset, rows, masks, fits, out, methods=METHODS, share_native_direction=False,
+             baseline_method="timesnet_native"):
     out.mkdir(parents=True, exist_ok=True)
     scores = pd.DataFrame(rows)
     key = ["condition", "replicate"]
     if scores.duplicated([*key, "split", "sample_id"]).any() or not np.isfinite(scores[list(methods)]).all().all():
         raise ValueError(f"Invalid scores for {dataset}")
-    native_sign = native_score_direction(dataset, scores)
-    scores["native_raw"] = scores.timesnet_native
-    oriented_methods = list(methods) if share_native_direction else ["timesnet_native"]
+    native_sign = native_score_direction(dataset, scores, baseline_method)
+    scores["native_raw"] = scores[baseline_method]
+    oriented_methods = list(methods) if share_native_direction else [baseline_method]
     scores[oriented_methods] *= native_sign
     scores.to_csv(out / "scores.csv.gz", index=False)
     pd.DataFrame(masks).to_csv(out / "masks.csv", index=False)
