@@ -27,3 +27,5 @@ The latent ablation separates the effect of an exact-mask healthy center from th
 The post-TimesBlock 2 audit compares a healthy-trained residual adapter against the unchanged TimesNet checkpoint on both bridges. It measures changes before and after LayerNorm, reconstruction error by class, paired ranking flips, and the clean identity condition.
 
 The post-block scoring trial keeps the fitted adapter and compares its original reconstruction score with a single score that also reads sensor-level reconstruction gains. Healthy reference masks fit the gain distribution. The existing score direction is shared by all three branches and the clean score is exactly preserved.
+
+The USAD transfer trial uses the EURECOM encoder and two decoders with alternating training. It keeps the CLMM residual adapter on the first encoding and compares native scoring, adapter-only scoring, and the gain-based head under common masks on both bridges. All 1,024 native samples are scored in contiguous 128-point patches by default.
