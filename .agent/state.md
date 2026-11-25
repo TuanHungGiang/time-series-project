@@ -29,3 +29,5 @@ The post-TimesBlock 2 audit compares a healthy-trained residual adapter against 
 The post-block scoring trial keeps the fitted adapter and compares its original reconstruction score with a single score that also reads sensor-level reconstruction gains. Healthy reference masks fit the gain distribution. The existing score direction is shared by all three branches and the clean score is exactly preserved.
 
 The USAD transfer trial uses the EURECOM encoder and two decoders with alternating training. It keeps the CLMM residual adapter on the first encoding and compares native scoring, adapter-only scoring, and the gain-based head under common masks on both bridges. All 1,024 native samples are scored in contiguous 128-point patches by default.
+
+The targeted baseline benchmark reuses the seven source baselines from `codex/mdr-shm-kaggle` on both bridges. It reports fixed clean Q90 calibration, physical single-channel removals, and a cumulative sensor-removal order shared across methods and seeds. The order is estimated from held-out healthy PCA-SPE sensitivity and the curve stops with one channel per group.
