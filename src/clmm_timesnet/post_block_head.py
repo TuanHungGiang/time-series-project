@@ -108,12 +108,12 @@ class GainHeadAudit(ResidualAudit):
         return np.concatenate(rows)
 
 
-def select_raw_direction(dataset, rows):
-    sign = native_score_direction(dataset, pd.DataFrame(rows))
+def select_raw_direction(dataset, rows, baseline_method=AUDIT_METHODS[0], method=NEW_METHOD):
+    sign = native_score_direction(dataset, pd.DataFrame(rows), baseline_method)
     for row in rows:
         upper = row.pop("head_upper_raw")
         lower = row.pop("head_lower_raw")
-        row[NEW_METHOD] = upper if sign == 1 else lower
+        row[method] = upper if sign == 1 else lower
 
 
 def main():
