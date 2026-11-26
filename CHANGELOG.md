@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restored the selected baseline roster in the archived reporting table after removing USAD.
+
 - Added a one-seed Z24 and HellBridge transfer check for the unchanged residual-whitening head.
 
 - Added a HellBridge masked residual-whitening head, diagonal comparator, and protocol-labeled baseline comparison.
