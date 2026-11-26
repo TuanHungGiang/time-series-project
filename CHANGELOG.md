@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added the 1024-point HellBridge spectral reconstruction pilot, six paired score heads, and healthy rank threshold comparisons.
+
 - Added an optional per-sensor healthy normalization head and paired comparison with pooled reconstruction MSE on both bridges.
 
 - Added a focused Z24 01-FVT audit that separates sensor selection, masked input, and adapter effects on reconstruction error.

@@ -61,7 +61,7 @@ class ResidualAudit:
     def prepare(self, raw):
         return (self.detector.scaler.transform(raw),)
 
-    def residual(self, values, kept, enabled, monitor=False):
+    def predict_observed(self, values, kept, enabled, monitor=False):
         mask = kept.view(1, -1, 1)
         masked = torch.where(mask, values, 0.0)
         shifts = ()
@@ -84,7 +84,11 @@ class ResidualAudit:
                 hook.remove()
         else:
             predicted = reconstruct(model, masked)
-        return (predicted[:, kept] - values[:, kept]).square(), shifts
+        return predicted[:, kept], shifts
+
+    def residual(self, values, kept, enabled, monitor=False):
+        prediction, shifts = self.predict_observed(values, kept, enabled, monitor)
+        return (prediction - values[:, kept]).square(), shifts
 
     def error(self, values, kept, enabled, monitor=False):
         squared, shifts = self.residual(values, kept, enabled, monitor)

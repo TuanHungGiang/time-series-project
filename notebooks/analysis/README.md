@@ -43,3 +43,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 Run the threshold audit with `--per-sensor` to compare both score heads from the same model predictions on the two bridges. The pilot uses seed 20270901, clean input, the previous targeted mask, and five nested random masks near 30% and 50% sensor loss. The ZIP contains paired metrics, per-sensor healthy references and the Z24 01-FVT score trace.
 
 Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu điểm từ cùng các dự đoán tái tạo trên hai cầu. Thử một seed 20270901 ở clean, mask theo thứ tự cũ và năm mask ngẫu nhiên lồng nhau ở mức mất khoảng 30% và 50% sensor. ZIP chứa chênh lệch ghép cặp, mốc healthy theo sensor và log điểm của bản ghi Z24 01-FVT.
+
+[HellBridge spectral scoring pilot](../../src/clmm_timesnet/hellbridge_spectral_kaggle.py) uses one 1024-point TimesNet checkpoint and adapter across all score heads. It contrasts time reconstruction, original gain, observed spectra, and a joint time/spectrum score with clean and exact-mask thresholds at nominal 5% and 10%. The report includes false-positive rates, low-FPR recall, and alarm rates for each damage state.
+
+[Thử đầu điểm phổ trên HellBridge](../../src/clmm_timesnet/hellbridge_spectral_kaggle.py) dùng chung TimesNet 1.024 điểm và adapter cho các đầu điểm. Runner đối chiếu lỗi tái tạo, gain cũ, điểm phổ quan sát và đầu điểm kết hợp, với ngưỡng clean và ngưỡng theo mask ở mức danh nghĩa 5% và 10%. Báo cáo có FPR, recall ở FPR thấp và tỷ lệ cảnh báo cho từng trạng thái hư hỏng.
