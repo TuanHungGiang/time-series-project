@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a HellBridge low-FPR spectral scoring pilot with bounded adjustments and paired alarm diagnostics.
+
 - Fixed initialization of the native TimesNet detector in the HellBridge spectral and gain-preserving pilots by explicitly disabling layer probes.
 
 - Added the HellBridge gain-preserving spectral head with a clean-input gate and direct reuse of historical spectral scores.

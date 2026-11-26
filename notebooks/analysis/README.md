@@ -51,3 +51,7 @@ Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu đi�
 [Keep-gain HellBridge pilot](../../src/clmm_timesnet/hellbridge_keep_gain_kaggle.py) adds a spectral correction to the original CLMM gain head only when sensors are missing. It reuses compatible native-resolution spectral scores when available and compares both heads on identical windows and masks.
 
 [Thử CLMM giữ gain cũ trên HellBridge](../../src/clmm_timesnet/hellbridge_keep_gain_kaggle.py) thêm điểm phổ vào đầu gain gốc khi mất sensor. Runner dùng lại các điểm của lần thử phổ 1.024 điểm nếu có và so sánh các đầu điểm trên cùng cửa sổ và mask.
+
+[HellBridge low-FPR spectral audit](../../src/clmm_timesnet/hellbridge_low_fpr_kaggle.py) compares two bounded spectral adjustments with the original and unbounded gain heads. It uses the existing 1024-point scores when available and exports low-FPR recall, partial AUC, and changed alarms by damage state and healthy window.
+
+[Thử giới hạn điểm phổ ở vùng FPR thấp](../../src/clmm_timesnet/hellbridge_low_fpr_kaggle.py) so sánh hai cách giới hạn phần phổ với đầu gain gốc và đầu cộng phổ trước đó. Runner dùng lại điểm 1.024 nếu có và xuất recall tại FPR thấp, partial AUC và các thay đổi cảnh báo theo trạng thái hư hỏng và cửa sổ healthy.
