@@ -15,3 +15,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [CNN-AE 1D baseline](kaggle_cnn_ae_1d.py) evaluates a multichannel PyTorch port of the Keras convolutional autoencoder with the same targeted protocol. It saves the checkpoint, score exports, clean operating point and all sensor-loss conditions. Set `SEED_INDICES = list(range(10))` to run ten seeds. The notebook displays mean ± sample SD and exports both numeric and formatted tables.
 
 [Baseline CNN-AE 1D](kaggle_cnn_ae_1d.py) dùng bản chuyển kiến trúc CNN-AE của Keras sang PyTorch nhiều kênh. Cell xuất checkpoint, điểm dự đoán và kết quả trên cùng các mask sensor của benchmark. Bảng hiện mean ± SD mẫu và lưu cả CSV số gốc lẫn CSV đã định dạng.
+
+[Centered gain-head ablation](kaggle_centered_gain_head.py) compares the original gain head against a version that subtracts the healthy median for the same mask. The cell can reuse the original CLMM checkpoints and writes paired differences with the clean threshold frozen.
+
+[Gain head trừ trung vị healthy](kaggle_centered_gain_head.py) so sánh hai đầu điểm trên cùng checkpoint và mask. Cell tái sử dụng checkpoint CLMM nếu có và lưu chênh lệch theo từng seed tại ngưỡng clean cố định.

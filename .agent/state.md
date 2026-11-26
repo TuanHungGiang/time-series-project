@@ -39,3 +39,5 @@ The targeted gain-head runner ports the post-TimesBlock-2 residual adapter and g
 The optional CNN-AE 1D baseline ports the official Keras convolutional architecture to multichannel PyTorch tensors. It retains Adam, MSE training and reconstruction MAE scoring. The targeted runner supplies the existing splits, corruption and healthy calibration.
 
 The CNN-AE Kaggle cell checks coverage for each requested seed and displays mean ± sample SD for all reported metrics.
+
+The centered gain-head ablation subtracts the healthy aggregate gain median under the exact evaluation mask and compares against the original gain head, the residual adapter and native TimesNet. It supports reusing the fitted backbone and adapter from the previous CLMM benchmark.

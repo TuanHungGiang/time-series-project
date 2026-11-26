@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a healthy-median centered gain-head ablation and a Kaggle launcher for the targeted masks.
+
 - Display and export CNN-AE metrics as mean ± sample standard deviation across seeds.
 
 - Added the optional one-dimensional CNN autoencoder baseline and a one-cell Kaggle runner using the targeted protocol.
