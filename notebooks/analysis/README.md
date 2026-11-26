@@ -31,3 +31,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [Conditional gain scoring trial](../../src/clmm_timesnet/conditional_gain_kaggle.py) compares the reconstruction score after the adapter with marginal and conditional gain scores on the same cumulative masks for both bridges. The runner reuses compatible CLMM checkpoints and exports paired deltas, recall at fixed FPR limits, and results at healthy validation thresholds.
 
 [Thử đầu điểm gain có điều kiện](../../src/clmm_timesnet/conditional_gain_kaggle.py) so sánh điểm tái tạo sau adapter, điểm cộng gain và điểm cộng phần dư gain trên cùng mask cho hai cầu. Runner dùng lại checkpoint CLMM tương thích và xuất chênh lệch ghép cặp, recall tại cùng giới hạn FPR và kết quả tại ngưỡng healthy trên validation.
+
+[Threshold audit across sensor masks](../../src/clmm_timesnet/threshold_masks_kaggle.py) compares frozen clean Q90 and mask-specific Q90 with the same adapted reconstruction scores at clean and matched 30/50% sensor removal. It reuses compatible CLMM checkpoints, exports all mask results and five-mask descriptive summaries, and traces the high-scoring healthy Z24 validation record.
+
+[Kiểm tra ngưỡng trên nhiều mask](../../src/clmm_timesnet/threshold_masks_kaggle.py) so sánh Q90 clean cố định và Q90 theo mask trên cùng điểm tái tạo ở clean và mất khoảng 30/50% sensor. Runner dùng lại checkpoint CLMM tương thích, xuất kết quả từng mask, thống kê mô tả qua năm mask và điểm của bản ghi healthy Z24 đứng đầu ở lần thử trước.
