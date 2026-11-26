@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed initialization of the native TimesNet detector in the HellBridge spectral and gain-preserving pilots by explicitly disabling layer probes.
+
 - Added the HellBridge gain-preserving spectral head with a clean-input gate and direct reuse of historical spectral scores.
 
 - Added the 1024-point HellBridge spectral reconstruction pilot, six paired score heads, and healthy rank threshold comparisons.

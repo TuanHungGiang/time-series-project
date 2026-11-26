@@ -165,7 +165,7 @@ def main():
     out = cli.output_dir
     out.mkdir(parents=True, exist_ok=True)
     args = argparse.Namespace(hell_h5=cli.hell_h5, seed=SEED, epochs=5, adapter_epochs=8, batch_size=8, strength=.50,
-                              gain_weight=.25, replicates=MASKS, train_log=[], reference_log=[])
+                              gain_weight=.25, replicates=MASKS, layer_probe=False, train_log=[], reference_log=[])
     (out / "protocol.json").write_text(json.dumps(dict(
         seed=SEED, dataset="HellBridge P2_NM_Z", input=str(cli.hell_h5), timesnet_epochs=args.epochs,
         adapter_epochs=args.adapter_epochs, batch_size=args.batch_size, native_points=LENGTH, sample_rate_hz=SAMPLE_HZ,
