@@ -43,3 +43,5 @@ The CNN-AE Kaggle cell checks coverage for each requested seed and displays mean
 The centered gain-head ablation subtracts the healthy aggregate gain median under the exact evaluation mask and compares against the original gain head, the residual adapter and native TimesNet. It supports reusing the fitted backbone and adapter from the previous CLMM benchmark.
 
 The original gain-head diagnostic reports the pre-centering CLMM model alone at clean and the nearest cumulative 10/30/50% sensor loss. It logs matched-healthy separation at each layer, FFT changes and adapter activation shifts before and after LayerNorm.
+
+The Laplacian score trial compares the original CLMM head, adapter reconstruction, clipped gain, gain variance, and graph energy on the same Z24 and HellBridge test cohorts. It uses seed 20270901 and the nearest cumulative masks at 30% and 50% loss. The graph uses absolute sensor correlations from healthy training data. Exact-mask healthy reference windows center the gain and normalize variance and graph energy. Real-data results for the new head are pending.

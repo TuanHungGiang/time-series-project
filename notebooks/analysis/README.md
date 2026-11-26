@@ -23,3 +23,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [Original gain-head layer audit](kaggle_old_gain_diagnostics.py) reports the original score on four benchmark masks and logs layer separability, period selection and the adapter shift before and after LayerNorm.
 
 [Chẩn đoán từng lớp của gain head gốc](kaggle_old_gain_diagnostics.py) in điểm phát hiện trên bốn mức mất sensor và ghi độ tách healthy/damage, thay đổi bin FFT và độ dịch qua adapter và LayerNorm.
+
+[Laplacian gain scoring trial](../../src/clmm_timesnet/laplacian_kaggle.py) runs seed 20270901 on Z24 and HellBridge. It evaluates the original CLMM, adapter reconstruction, clipped gain, gain variance and graph Laplacian on matched cumulative masks near 30% and 50% loss, with a clean reconstruction reference. Run the script with `runpy.run_path(..., run_name="__main__")` from a Kaggle cell to display the result tables and ZIP link.
+
+[Thử điểm gain Laplacian](../../src/clmm_timesnet/laplacian_kaggle.py) chạy seed 20270901 trên hai cầu. Script so sánh CLMM gốc, lỗi tái tạo sau hiệu chỉnh, gain chặn trần, phương sai gain và Laplacian trên cùng mask mất gần 30% và 50%, với điểm tái tạo clean làm mốc. Gọi script bằng `runpy.run_path(..., run_name="__main__")` trong Kaggle để hiện bảng và link ZIP.
