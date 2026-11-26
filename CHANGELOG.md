@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a focused Z24 01-FVT audit that separates sensor selection, masked input, and adapter effects on reconstruction error.
+
 - Added a two-bridge Q90 threshold audit over targeted and nested random masks, with healthy validation score and normalization diagnostics.
 
 - Added a one-seed Kaggle comparison of adapted reconstruction, marginal gain, and conditional gain residuals on Z24 and HellBridge with separate healthy threshold calibration.

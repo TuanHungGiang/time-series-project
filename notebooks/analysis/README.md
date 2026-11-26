@@ -35,3 +35,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [Threshold audit across sensor masks](../../src/clmm_timesnet/threshold_masks_kaggle.py) compares frozen clean Q90 and mask-specific Q90 with the same adapted reconstruction scores at clean and matched 30/50% sensor removal. It reuses compatible CLMM checkpoints, exports all mask results and five-mask descriptive summaries, and traces the high-scoring healthy Z24 validation record.
 
 [Kiểm tra ngưỡng trên nhiều mask](../../src/clmm_timesnet/threshold_masks_kaggle.py) so sánh Q90 clean cố định và Q90 theo mask trên cùng điểm tái tạo ở clean và mất khoảng 30/50% sensor. Runner dùng lại checkpoint CLMM tương thích, xuất kết quả từng mask, thống kê mô tả qua năm mask và điểm của bản ghi healthy Z24 đứng đầu ở lần thử trước.
+
+[Z24 01-FVT reconstruction audit](../../src/clmm_timesnet/z24_01_fvt_audit_kaggle.py) traces the high-scoring healthy validation record with the previous targeted masks and a shared checkpoint. It exports per-window and per-sensor errors, matched healthy score scaling, and paired changes from sensor selection, masked inputs, and the adapter.
+
+[Kiểm tra lỗi tái tạo Z24 01-FVT](../../src/clmm_timesnet/z24_01_fvt_audit_kaggle.py) truy vết bản ghi healthy validation có điểm cao với cùng checkpoint và các mask theo thứ tự cũ. Runner lưu lỗi theo cửa sổ và sensor, hệ số chuẩn hóa healthy và chênh lệch do ba bước chọn sensor, che đầu vào và bật adapter.
