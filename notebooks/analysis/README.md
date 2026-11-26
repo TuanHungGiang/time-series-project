@@ -55,3 +55,7 @@ Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu đi�
 [HellBridge low-FPR spectral audit](../../src/clmm_timesnet/hellbridge_low_fpr_kaggle.py) compares two bounded spectral adjustments with the original and unbounded gain heads. It uses the existing 1024-point scores when available and exports low-FPR recall, partial AUC, and changed alarms by damage state and healthy window.
 
 [Thử giới hạn điểm phổ ở vùng FPR thấp](../../src/clmm_timesnet/hellbridge_low_fpr_kaggle.py) so sánh hai cách giới hạn phần phổ với đầu gain gốc và đầu cộng phổ trước đó. Runner dùng lại điểm 1.024 nếu có và xuất recall tại FPR thấp, partial AUC và các thay đổi cảnh báo theo trạng thái hư hỏng và cửa sổ healthy.
+
+Run the spectral pilot with `--segment-consensus` to replace the Welch-averaged spectral discrepancy with a per-sensor median of three overlapping 512-point discrepancies. The report compares both spectral statistics with the same CLMM weights, masks, healthy calibration and bounded signed adjustment.
+
+Chạy thử nghiệm phổ với `--segment-consensus` để lấy trung vị độ lệch phổ của ba đoạn 512 điểm chồng lấn trên từng sensor. Báo cáo so sánh với sai lệch phổ tính sau khi lấy trung bình Welch, trên cùng trọng số CLMM, mask, mốc healthy và công thức giới hạn điểm.

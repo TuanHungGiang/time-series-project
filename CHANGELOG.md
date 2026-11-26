@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a HellBridge within-window spectral consensus variant with paired low-FPR comparisons.
+
 - Added a HellBridge low-FPR spectral scoring pilot with bounded adjustments and paired alarm diagnostics.
 
 - Fixed initialization of the native TimesNet detector in the HellBridge spectral and gain-preserving pilots by explicitly disabling layer probes.
