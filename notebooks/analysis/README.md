@@ -59,3 +59,9 @@ Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu đi�
 Run the spectral pilot with `--segment-consensus` to replace the Welch-averaged spectral discrepancy with a per-sensor median of three overlapping 512-point discrepancies. The report compares both spectral statistics with the same CLMM weights, masks, healthy calibration and bounded signed adjustment.
 
 Chạy thử nghiệm phổ với `--segment-consensus` để lấy trung vị độ lệch phổ của ba đoạn 512 điểm chồng lấn trên từng sensor. Báo cáo so sánh với sai lệch phổ tính sau khi lấy trung bình Welch, trên cùng trọng số CLMM, mask, mốc healthy và công thức giới hạn điểm.
+
+### HellBridge cross-sensor residuals
+
+Run `python -m clmm_timesnet.hellbridge_spectral_kaggle --residual-whitening --baseline-reference experiments/baseline_reference.csv` with `src` on `PYTHONPATH`. The pilot uses seed 20270905 with native 1024-point inputs. `baseline_comparison.csv` includes the current paired heads and historical rows. Each row gives the protocol, masking design, seed count, SD axis, and source. The historical random table was reconstructed from `outputs/paper_sensor_loss_figures/baseline_plot_data.csv`; targeted checkpoints use the listed locally saved summaries, and the ten-seed CNN-AE rows use the displayed table in `notebook73c51fdeb9 (24).ipynb`. Blank fields indicate unavailable metrics.
+
+Chạy chế độ `--residual-whitening` cùng bảng `--baseline-reference` để đối chiếu trên HellBridge. Bảng ghi rõ giao thức, kiểu mất sensor, số seed và nguồn. Dùng `paired_deltas.csv` để so sánh theo đúng từng mask giữa các đầu điểm chạy cùng lượt. Dùng `baseline_comparison.csv` để xem các baseline lịch sử và số liệu cùng lượt chạy.

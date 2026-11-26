@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a HellBridge masked residual-whitening head, diagonal comparator, and protocol-labeled baseline comparison.
+
 - Added a HellBridge within-window spectral consensus variant with paired low-FPR comparisons.
 
 - Added a HellBridge low-FPR spectral scoring pilot with bounded adjustments and paired alarm diagnostics.
