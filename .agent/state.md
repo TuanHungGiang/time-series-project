@@ -37,3 +37,5 @@ The targeted runner saves inference-ready checkpoint weights, fit normalization,
 The targeted gain-head runner ports the post-TimesBlock-2 residual adapter and gain head to the existing baseline split, input shapes and single/cumulative sensor masks. It shares a TimesNet backbone and frozen clean calibration across native, adapter-only and gain-head branches. Stored baseline weights and sensor orders may be reused.
 
 The optional CNN-AE 1D baseline ports the official Keras convolutional architecture to multichannel PyTorch tensors. It retains Adam, MSE training and reconstruction MAE scoring. The targeted runner supplies the existing splits, corruption and healthy calibration.
+
+The CNN-AE Kaggle cell checks coverage for each requested seed and displays mean ± sample SD for all reported metrics.

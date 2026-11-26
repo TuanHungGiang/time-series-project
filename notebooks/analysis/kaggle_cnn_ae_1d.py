@@ -76,11 +76,32 @@ for dataset in DATASETS:
         nearby.append(cumulative.loc[cumulative.removed_percent.eq(best)].assign(requested_loss_percent=percent))
     display(Image(filename=str(OUT / dataset / "cumulative_sensor_loss.png")))
 cols = ["dataset", "model", "requested_loss_percent", "removed_percent", "runs"]
-for metric in ("auc", "ap", "ba", "recall", "fpr", "precision", "f1", "recall_low_fpr"):
+metrics = {
+    "auc": "AUC", "ap": "AP", "ba": "BA", "recall": "Recall", "fpr": "FPR",
+    "precision": "Precision", "f1": "F1", "recall_low_fpr": "Recall at low FPR",
+}
+for metric in metrics:
     cols.extend([f"{metric}_mean", f"{metric}_std"])
 focus = pd.concat(nearby, ignore_index=True)[cols]
+expected_seeds = len(SEED_INDICES)
+if len(focus) != 4 * len(DATASETS) or not focus.runs.eq(expected_seeds).all():
+    raise ValueError(f"Expected four conditions per bridge and {expected_seeds} seeds per condition")
+if expected_seeds > 1 and focus[[f"{metric}_std" for metric in metrics]].isna().any().any():
+    raise ValueError("A metric has missing standard deviation")
 focus.to_csv(OUT / "clean_and_nearest_10_30_50.csv", index=False)
-display(focus[["dataset", "model", "removed_percent", "auc_mean", "auc_std", "ba_mean", "recall_mean", "fpr_mean", "runs"]].round(4))
+formatted = focus[["dataset", "requested_loss_percent", "removed_percent", "runs"]].rename(columns={
+    "dataset": "Bridge", "requested_loss_percent": "Requested loss (%)",
+    "removed_percent": "Actual loss (%)", "runs": "Seeds",
+}).copy()
+formatted["Actual loss (%)"] = formatted["Actual loss (%)"].round(2)
+for metric, label in metrics.items():
+    formatted[label] = [
+        f"{mean:.4f} ± {sd:.4f}" if pd.notna(sd) else f"{mean:.4f} ± —"
+        for mean, sd in zip(focus[f"{metric}_mean"], focus[f"{metric}_std"], strict=True)
+    ]
+formatted.to_csv(OUT / "cnn_ae_1d_mean_sd_table.csv", index=False, encoding="utf-8-sig")
+print("Metrics shown as mean ± sample SD across seeds, in [0, 1].", flush=True)
+display(formatted)
 zip_path = shutil.make_archive(str(WORK / "cnn_ae_1d_targeted_report"), "zip", root_dir=OUT)
 display(FileLink(os.path.relpath(zip_path)))
 print("Weights:", WEIGHTS)

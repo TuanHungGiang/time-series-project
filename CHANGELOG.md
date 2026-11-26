@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Display and export CNN-AE metrics as mean ± sample standard deviation across seeds.
+
 - Added the optional one-dimensional CNN autoencoder baseline and a one-cell Kaggle runner using the targeted protocol.
 
 - Added a one-cell Kaggle comparison of the post-block gain head and native TimesNet under the targeted baseline protocol.
