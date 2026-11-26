@@ -39,3 +39,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [Z24 01-FVT reconstruction audit](../../src/clmm_timesnet/z24_01_fvt_audit_kaggle.py) traces the high-scoring healthy validation record with the previous targeted masks and a shared checkpoint. It exports per-window and per-sensor errors, matched healthy score scaling, and paired changes from sensor selection, masked inputs, and the adapter.
 
 [Kiểm tra lỗi tái tạo Z24 01-FVT](../../src/clmm_timesnet/z24_01_fvt_audit_kaggle.py) truy vết bản ghi healthy validation có điểm cao với cùng checkpoint và các mask theo thứ tự cũ. Runner lưu lỗi theo cửa sổ và sensor, hệ số chuẩn hóa healthy và chênh lệch do ba bước chọn sensor, che đầu vào và bật adapter.
+
+Run the threshold audit with `--per-sensor` to compare both score heads from the same model predictions on the two bridges. The pilot uses seed 20270901, clean input, the previous targeted mask, and five nested random masks near 30% and 50% sensor loss. The ZIP contains paired metrics, per-sensor healthy references and the Z24 01-FVT score trace.
+
+Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu điểm từ cùng các dự đoán tái tạo trên hai cầu. Thử một seed 20270901 ở clean, mask theo thứ tự cũ và năm mask ngẫu nhiên lồng nhau ở mức mất khoảng 30% và 50% sensor. ZIP chứa chênh lệch ghép cặp, mốc healthy theo sensor và log điểm của bản ghi Z24 01-FVT.
