@@ -47,3 +47,7 @@ Chạy kiểm tra ngưỡng với `--per-sensor` để so sánh hai đầu đi�
 [HellBridge spectral scoring pilot](../../src/clmm_timesnet/hellbridge_spectral_kaggle.py) uses one 1024-point TimesNet checkpoint and adapter across all score heads. It contrasts time reconstruction, original gain, observed spectra, and a joint time/spectrum score with clean and exact-mask thresholds at nominal 5% and 10%. The report includes false-positive rates, low-FPR recall, and alarm rates for each damage state.
 
 [Thử đầu điểm phổ trên HellBridge](../../src/clmm_timesnet/hellbridge_spectral_kaggle.py) dùng chung TimesNet 1.024 điểm và adapter cho các đầu điểm. Runner đối chiếu lỗi tái tạo, gain cũ, điểm phổ quan sát và đầu điểm kết hợp, với ngưỡng clean và ngưỡng theo mask ở mức danh nghĩa 5% và 10%. Báo cáo có FPR, recall ở FPR thấp và tỷ lệ cảnh báo cho từng trạng thái hư hỏng.
+
+[Keep-gain HellBridge pilot](../../src/clmm_timesnet/hellbridge_keep_gain_kaggle.py) adds a spectral correction to the original CLMM gain head only when sensors are missing. It reuses compatible native-resolution spectral scores when available and compares both heads on identical windows and masks.
+
+[Thử CLMM giữ gain cũ trên HellBridge](../../src/clmm_timesnet/hellbridge_keep_gain_kaggle.py) thêm điểm phổ vào đầu gain gốc khi mất sensor. Runner dùng lại các điểm của lần thử phổ 1.024 điểm nếu có và so sánh các đầu điểm trên cùng cửa sổ và mask.

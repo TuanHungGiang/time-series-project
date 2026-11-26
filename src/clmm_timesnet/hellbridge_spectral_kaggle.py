@@ -106,7 +106,7 @@ def calibration_cutoff(healthy, alpha):
     return float(np.nextafter(values[-count], np.inf)) if count else float("inf")
 
 
-def calibration_report(saved_scores):
+def calibration_report(saved_scores, methods=METHODS):
     scores = pd.read_csv(saved_scores, float_precision="round_trip")
     grouped = ["condition", "replicate"]
     clean = scores.loc[scores.split.eq("val") & scores.condition.eq("clean")]
@@ -120,7 +120,7 @@ def calibration_report(saved_scores):
                 or test.label.value_counts().to_dict() != {0: 80, 1: 640}):
             raise ValueError(f"Invalid calibration or test cohort for {condition}/{replicate}")
         y = test.label.to_numpy()
-        for method in METHODS:
+        for method in methods:
             values = test[method].to_numpy()
             for policy, ref in (("clean_calibration", clean), ("same_mask_calibration", cal)):
                 for alpha in (.05, .10):
@@ -133,6 +133,26 @@ def calibration_report(saved_scores):
                         state_rows.append(dict(**meta, state=state, windows=len(subset),
                                                alarm_rate=subset[method].ge(threshold).mean()))
     return pd.DataFrame(alerts), pd.DataFrame(state_rows)
+
+
+def write_calibration_reports(saved_scores, out, methods=METHODS, candidate="clmm_spectral"):
+    alerts, states = calibration_report(saved_scores, methods)
+    alerts.to_csv(out / "calibration_by_mask.csv", index=False)
+    states.to_csv(out / "alarms_by_damage_state.csv", index=False)
+    metrics = ["auc", "ap", "ba", "recall", "fpr", "f1", "recall_at_fpr_05"]
+    keys = ["condition", "method", "policy", "alpha"]
+    summary = alerts.groupby(keys)[metrics].agg(["mean", "std"])
+    summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
+    summary.reset_index().to_csv(out / "calibration_summary.csv", index=False)
+    index = ["condition", "replicate", "policy", "alpha"]
+    paired = alerts.set_index([*index, "method"])
+    proposed = paired.xs(candidate, level="method")[metrics]
+    deltas = pd.concat([
+        (proposed - paired.xs(method, level="method")[metrics]).add_prefix("delta_")
+        .assign(baseline=method).reset_index()
+        for method in methods if method != candidate
+    ], ignore_index=True)
+    deltas.to_csv(out / "paired_deltas.csv", index=False)
 
 
 def main():
@@ -161,20 +181,7 @@ def main():
     print(f"device={device} seed={SEED} | points={LENGTH} | masks={list(MASKS)}", flush=True)
     rows, masks, fits = run_hellbridge(args, device, out, make_block=SpectralGainAudit)
     evaluate("HellBridge", rows, masks, fits, out, methods=METHODS)
-    alerts, states = calibration_report(out / "scores.csv.gz")
-    alerts.to_csv(out / "calibration_by_mask.csv", index=False)
-    states.to_csv(out / "alarms_by_damage_state.csv", index=False)
-    metrics = ["auc", "ap", "ba", "recall", "fpr", "f1", "recall_at_fpr_05"]
-    keys = ["condition", "method", "policy", "alpha"]
-    summary = alerts.groupby(keys)[metrics].agg(["mean", "std"])
-    summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
-    summary.reset_index().to_csv(out / "calibration_summary.csv", index=False)
-    index = ["condition", "replicate", "policy", "alpha"]
-    paired = alerts.set_index([*index, "method"])
-    candidate = paired.xs("clmm_spectral", level="method")[metrics]
-    deltas = pd.concat([(candidate - paired.xs(method, level="method")[metrics]).add_prefix("delta_")
-                        .assign(baseline=method).reset_index() for method in METHODS[:-1]], ignore_index=True)
-    deltas.to_csv(out / "paired_deltas.csv", index=False)
+    write_calibration_reports(out / "scores.csv.gz", out)
     pd.DataFrame(args.train_log).to_csv(out / "adapter_training.csv", index=False)
     bundle = shutil.make_archive(str(out) + "_report", "zip", root_dir=out)
     print(f"HELLBRIDGE_SPECTRAL_PASS reports={out} zip={bundle}", flush=True)
