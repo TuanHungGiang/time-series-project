@@ -35,3 +35,5 @@ The targeted baseline benchmark reuses the seven source baselines from `codex/md
 The targeted runner saves inference-ready checkpoint weights, fit normalization, calibration and a score round-trip probe per group. It also exports raw and preprocessed examples, split and channel inventories, model geometry, window traces, score overlap inputs, ROC/PR points and confusion counts. The Kaggle cell partitions storage by seed and merges ten completed report shards under a common protocol.
 
 The targeted gain-head runner ports the post-TimesBlock-2 residual adapter and gain head to the existing baseline split, input shapes and single/cumulative sensor masks. It shares a TimesNet backbone and frozen clean calibration across native, adapter-only and gain-head branches. Stored baseline weights and sensor orders may be reused.
+
+The optional CNN-AE 1D baseline ports the official Keras convolutional architecture to multichannel PyTorch tensors. It retains Adam, MSE training and reconstruction MAE scoring. The targeted runner supplies the existing splits, corruption and healthy calibration.

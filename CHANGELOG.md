@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added the optional one-dimensional CNN autoencoder baseline and a one-cell Kaggle runner using the targeted protocol.
+
 - Added a one-cell Kaggle comparison of the post-block gain head and native TimesNet under the targeted baseline protocol.
 
 - Save targeted baseline checkpoints before scoring and export reproducible figures, plot data and per-seed Kaggle reports.

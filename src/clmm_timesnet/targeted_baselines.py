@@ -21,6 +21,7 @@ from .data.prepare_hellbridge import main as prepare_hellbridge
 from .data.z24 import load_manifest, read_stable_vertical, record_windows, split_training_windows, stable_sensor_map
 from .metrics import publication_metrics, recall_at_fpr, threshold_from_healthy
 from .models.backbone import seed_everything
+from .models.cnn_ae_1d import MODEL_ID as CNN_AE_1D
 
 MODELS = ("pca_spe", "lstm_ae", "usad", "tranad", "timesnet", "moderntcn", "scatterad")
 SEEDS = (20270901, 20270913, 20270929, 20271011, 20271027, 20271109, 20271123, 20271207, 20271219, 20280103)
@@ -390,7 +391,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path)
     parser.add_argument("--datasets", nargs="+", choices=("Z24", "HellBridge"), default=["Z24", "HellBridge"])
-    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--models", nargs="+", choices=(*MODELS, CNN_AE_1D), default=list(MODELS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS))
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)

@@ -11,6 +11,8 @@ import pandas as pd
 import torch
 from sklearn.decomposition import PCA
 
+from .models import cnn_ae_1d
+
 
 def write_json(path, content):
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -19,6 +21,8 @@ def write_json(path, content):
 
 
 def architecture(source, name, channels, points):
+    if name == cnn_ae_1d.MODEL_ID:
+        return cnn_ae_1d.model_config(channels, points)
     if name == "timesnet":
         return vars(source.timesnet_config(channels, points))
     if name == "moderntcn":
@@ -35,6 +39,8 @@ def architecture(source, name, channels, points):
 
 def make_network(source, name, channels, points, config):
     from types import SimpleNamespace
+    if name == cnn_ae_1d.MODEL_ID:
+        return cnn_ae_1d.ConvAutoencoder1D(channels)
     if name == "usad":
         return source.UsadModel(config["window_size"], config["latent_size"])
     if name == "lstm_ae":
@@ -74,6 +80,8 @@ class Scorer:
             return self.source.score_usad(self.state, data, self.batch, self.device)
         if self.name == "scatterad":
             return self.score_scatter(data)
+        if self.name == cnn_ae_1d.MODEL_ID:
+            return cnn_ae_1d.score(self.state, data, self.batch, self.device)
         return self.source.score_reconstructor(self.name, self.state, data, self.batch, self.device)
 
     @torch.no_grad()
@@ -105,6 +113,8 @@ def fit_scorer(source, name, values, epochs, batch_size, device):
         state = source.fit_usad(fit, epochs, batch_size, device)
     elif name == "scatterad":
         state, edges = source.fit_scatterad(fit, epochs, device)
+    elif name == cnn_ae_1d.MODEL_ID:
+        state = cnn_ae_1d.fit(fit, epochs, batch_size, device)
     else:
         state = source.fit_reconstructor(name, fit, epochs, batch_size, device)
     scorer = Scorer(source, name, state, batch_size, device, scaler, edges)
