@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a one-seed Kaggle comparison of adapted reconstruction, marginal gain, and conditional gain residuals on Z24 and HellBridge with separate healthy threshold calibration.
+
 - Added a Kaggle scoring trial for graph Laplacian energy and gain variance at clean and cumulative 30/50% sensor loss on Z24 and HellBridge.
 
 - Added layer and score diagnostics for the original CLMM gain head under the benchmark masks.
