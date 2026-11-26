@@ -71,3 +71,11 @@ Chạy chế độ `--residual-whitening` cùng bảng `--baseline-reference` đ
 Run `python -m clmm_timesnet.whitening_two_bridges_kaggle --baseline-reference experiments/baseline_reference.csv` on Kaggle with both inputs attached and `src` on `PYTHONPATH`. The runner uses the same HellBridge score and hyperparameters on Z24 with its existing train/validation/test split. The shared Z24 score direction comes from clean validation. The paired summary uses diagnostic recall at 0% FPR on Z24, where a single false alarm among six healthy test records exceeds 5%, and 5% FPR on HellBridge. Each bridge also reports recall and realized FPR at its healthy-validation threshold. The original baseline reference appears in `baseline_comparison.csv` with the protocol for each row.
 
 Chạy `whitening_two_bridges_kaggle` để kiểm tra một seed trên cả hai cầu. Dùng `paired_summary.csv` cho kết quả chạy cùng split và mask, cùng `baseline_comparison.csv` để đối chiếu các baseline cũ theo giao thức đã lưu.
+
+### Ten-seed whitening experiment with portable checkpoints
+
+Run `python -m clmm_timesnet.whitening_multiseed_kaggle --baseline-reference experiments/baseline_reference.csv` with both data inputs attached and `src` on `PYTHONPATH`. The runner saves one checkpoint after each completed seed. Set `--seeds` to any subset of the registered seed roster for a shorter Kaggle session. Download `whitening_seed_checkpoints.zip` before closing a session and supply its dataset path through `--restore-zip` in a new session. Repeat `--restore-zip` to combine independently completed shards. Identical duplicate seeds are reused and conflicting results are reported.
+
+The output includes `summary_mean_sd.csv`, `paired_ci.csv`, `per_mask_metrics.csv`, and `baseline_comparison.csv`. The first two work from seed-level means over the shared masks. Intervals reflect training-seed variability on this fixed dataset split. Historical baseline rows retain their benchmark protocols.
+
+Chạy `whitening_multiseed_kaggle` với hai bộ dữ liệu và bảng `baseline_reference.csv`. Mỗi seed hoàn tất được lưu vào `whitening_seed_checkpoints.zip`. Dùng `--restore-zip` trong phiên Kaggle mới để nạp các seed đã chạy. Phần tổng hợp lấy trung bình qua mask trước khi tính mean và SD qua seed.

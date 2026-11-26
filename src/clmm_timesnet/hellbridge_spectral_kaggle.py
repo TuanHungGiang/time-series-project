@@ -283,6 +283,7 @@ def main(argv=None):
     parser.add_argument("--segment-consensus", action="store_true")
     parser.add_argument("--residual-whitening", action="store_true")
     parser.add_argument("--baseline-reference", type=Path)
+    parser.add_argument("--seed", type=int, default=SEED)
     cli = parser.parse_args(argv)
     if not cli.hell_h5.is_file():
         raise FileNotFoundError(f"Attach HellBridge: {cli.hell_h5}")
@@ -292,12 +293,12 @@ def main(argv=None):
     default_output = WHITENING_OUTPUT if cli.residual_whitening else SEGMENT_OUTPUT if segment_consensus else OUTPUT
     out = cli.output_dir or default_output
     out.mkdir(parents=True, exist_ok=True)
-    args = argparse.Namespace(hell_h5=cli.hell_h5, seed=SEED, epochs=5, adapter_epochs=8, batch_size=8, strength=.50,
+    args = argparse.Namespace(hell_h5=cli.hell_h5, seed=cli.seed, epochs=5, adapter_epochs=8, batch_size=8, strength=.50,
                               gain_weight=.25, replicates=MASKS, layer_probe=False, train_log=[], reference_log=[],
                               segment_consensus=segment_consensus, residual_whitening=cli.residual_whitening)
     methods = scoring_methods(segment_consensus, cli.residual_whitening)
     (out / "protocol.json").write_text(json.dumps(dict(
-        seed=SEED, dataset="HellBridge P2_NM_Z", input=str(cli.hell_h5), timesnet_epochs=args.epochs,
+        seed=args.seed, dataset="HellBridge P2_NM_Z", input=str(cli.hell_h5), timesnet_epochs=args.epochs,
         adapter_epochs=args.adapter_epochs, batch_size=args.batch_size, native_points=LENGTH, sample_rate_hz=SAMPLE_HZ,
         bands_hz=BANDS_HZ, segment_length=SEGMENT, segment_stride=STRIDE, spectral_weight=SPECTRAL_WEIGHT,
         methods=methods, nested_replicates=MASKS, threshold_alpha=(.05, .10),
@@ -311,7 +312,7 @@ def main(argv=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("Enable a GPU accelerator on Kaggle for the 1024-point pilot")
-    print(f"device={device} seed={SEED} | points={LENGTH} | masks={list(MASKS)}", flush=True)
+    print(f"device={device} seed={args.seed} | points={LENGTH} | masks={list(MASKS)}", flush=True)
     rows, masks, fits = run_hellbridge(args, device, out, make_block=SpectralGainAudit)
     evaluate("HellBridge", rows, masks, fits, out, methods=methods)
     candidate = WHITENING_METHODS[-1] if cli.residual_whitening else SEGMENT_METHODS[-1] if segment_consensus else "clmm_spectral"

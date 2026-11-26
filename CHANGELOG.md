@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added the resumable ten-seed experiment for paired CLMM whitening on both bridges.
+
 - Restored the selected baseline roster in the archived reporting table after removing USAD.
 
 - Added a one-seed Z24 and HellBridge transfer check for the unchanged residual-whitening head.

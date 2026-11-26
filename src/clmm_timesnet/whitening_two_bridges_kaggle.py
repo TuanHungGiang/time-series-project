@@ -48,13 +48,13 @@ def orient_z24(rows):
     return sign
 
 
-def run_z24_pilot(input_root, out, device):
+def run_z24_pilot(input_root, out, device, seed=SEED):
     args = argparse.Namespace(
-        z24_root=input_root, seed=SEED, epochs=5, adapter_epochs=8, batch_size=8, z24_windows=8,
+        z24_root=input_root, seed=seed, epochs=5, adapter_epochs=8, batch_size=8, z24_windows=8,
         strength=.50, gain_weight=.25, replicates=MASKS, layer_probe=False, train_log=[], reference_log=[],
         segment_consensus=False, residual_whitening=True,
     )
-    print(f"Z24 device={device} seed={SEED} points={LENGTH} masks={list(MASKS)}", flush=True)
+    print(f"Z24 device={device} seed={seed} points={LENGTH} masks={list(MASKS)}", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     rows, masks, fits = run_z24(args, device, make_block=Z24WhiteningAudit)
     sign = orient_z24(rows)
@@ -68,7 +68,7 @@ def run_z24_pilot(input_root, out, device):
     summary = summary.reset_index()
     summary.to_csv(out / "summary.csv", index=False)
     information = {
-        "seed": SEED, "points_per_window": LENGTH, "masks": MASKS, "window_cap_per_record": args.z24_windows,
+        "seed": seed, "points_per_window": LENGTH, "masks": MASKS, "window_cap_per_record": args.z24_windows,
         "training_epochs": args.epochs, "adapter_epochs": args.adapter_epochs, "batch_size": args.batch_size,
         "residual_correlation_shrinkage": CORRELATION_SHRINKAGE,
         "score_tail": "upper" if sign == 1 else "lower", "score_tail_source": "native scores on labeled clean validation",
@@ -93,6 +93,7 @@ def main():
     parser.add_argument("--hell-h5", type=Path, default=INPUT)
     parser.add_argument("--baseline-reference", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT)
+    parser.add_argument("--seed", type=int, default=SEED)
     cli = parser.parse_args()
     for path in (cli.hell_h5, cli.z24_root / "metadata/records_manifest.csv", cli.baseline_reference):
         if not path.is_file():
@@ -103,12 +104,13 @@ def main():
     out = cli.output_dir
     hell_out = out / "HellBridge"
     run_hellbridge_pilot([
-        "--hell-h5", str(cli.hell_h5), "--residual-whitening", "--output-dir", str(hell_out),
+        "--hell-h5", str(cli.hell_h5), "--residual-whitening", "--output-dir", str(hell_out), "--seed", str(cli.seed),
     ])
     hell = pd.read_csv(hell_out / "calibration_summary.csv")
     hell = hell.loc[hell.alpha.eq(.05) & hell.policy.eq("same_mask_calibration")].assign(dataset="HellBridge")
     hell = tag_current(hell, "hellbridge_native_1024_paired").drop(columns="alpha")
-    z24 = tag_current(run_z24_pilot(cli.z24_root, out / "Z24", torch.device("cuda")), "z24_native_1024_paired")
+    z24 = tag_current(run_z24_pilot(cli.z24_root, out / "Z24", torch.device("cuda"), seed=cli.seed),
+                      "z24_native_1024_paired")
     paired = pd.concat([hell, z24], ignore_index=True, sort=False)
     paired["diagnostic_recall_mean"] = paired["recall_at_fpr_05_mean"].fillna(paired["recall_low_fpr_mean"])
     paired["diagnostic_fpr_limit"] = np.where(paired.dataset.eq("Z24"), .0, .05)
