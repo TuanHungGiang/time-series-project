@@ -276,14 +276,14 @@ def write_baseline_comparison(out, path):
     combined.reindex(columns=[*columns, *tail]).to_csv(out / "baseline_comparison.csv", index=False)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hell-h5", type=Path, default=INPUT)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--segment-consensus", action="store_true")
     parser.add_argument("--residual-whitening", action="store_true")
     parser.add_argument("--baseline-reference", type=Path)
-    cli = parser.parse_args()
+    cli = parser.parse_args(argv)
     if not cli.hell_h5.is_file():
         raise FileNotFoundError(f"Attach HellBridge: {cli.hell_h5}")
     if cli.baseline_reference is not None and not cli.baseline_reference.is_file():

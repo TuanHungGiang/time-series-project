@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a one-seed Z24 and HellBridge transfer check for the unchanged residual-whitening head.
+
 - Added a HellBridge masked residual-whitening head, diagonal comparator, and protocol-labeled baseline comparison.
 
 - Added a HellBridge within-window spectral consensus variant with paired low-FPR comparisons.
