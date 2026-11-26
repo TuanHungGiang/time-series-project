@@ -223,6 +223,18 @@ def metric_row(labels, values, threshold, fpr_limit):
                 recall_low_fpr=recall_at_fpr(labels, values, fpr_limit))
 
 
+def clean_calibration(dataset, val, select_threshold):
+    tail = "upper"
+    if dataset == "Z24":
+        candidates = []
+        for direction in SCORE_COLUMNS:
+            _, metric = select_threshold(val.label, val[direction])
+            candidates.append(((metric["ba"], metric["auc"], metric["f1"], metric["specificity"]), direction))
+        tail = max(candidates, key=lambda pair: pair[0])[1]
+    threshold = threshold_from_healthy(val.loc[val.label.eq(0), tail].to_numpy(), .90)
+    return tail, threshold
+
+
 def evaluate(dataset, frame, max_steps, select_threshold):
     clean = frame.loc[frame.design.eq("clean")]
     val = clean.loc[clean.split.eq("val")]
@@ -232,14 +244,7 @@ def evaluate(dataset, frame, max_steps, select_threshold):
         raise RuntimeError(f"Unexpected {dataset} calibration or test counts")
     if not test.index.is_unique:
         raise ValueError("Duplicate clean test sample IDs")
-    tail = "upper"
-    if dataset == "Z24":
-        candidates = []
-        for direction in SCORE_COLUMNS:
-            _, metric = select_threshold(val.label, val[direction])
-            candidates.append(((metric["ba"], metric["auc"], metric["f1"], metric["specificity"]), direction))
-        tail = max(candidates, key=lambda pair: pair[0])[1]
-    threshold = threshold_from_healthy(val.loc[val.label.eq(0), tail].to_numpy(), .90)
+    tail, threshold = clean_calibration(dataset, val, select_threshold)
     fpr_limit = 0 if dataset == "Z24" else .05
     y = test.label.to_numpy()
     clean_scores = test[tail]

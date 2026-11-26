@@ -41,3 +41,5 @@ The optional CNN-AE 1D baseline ports the official Keras convolutional architect
 The CNN-AE Kaggle cell checks coverage for each requested seed and displays mean ± sample SD for all reported metrics.
 
 The centered gain-head ablation subtracts the healthy aggregate gain median under the exact evaluation mask and compares against the original gain head, the residual adapter and native TimesNet. It supports reusing the fitted backbone and adapter from the previous CLMM benchmark.
+
+The original gain-head diagnostic reports the pre-centering CLMM model alone at clean and the nearest cumulative 10/30/50% sensor loss. It logs matched-healthy separation at each layer, FFT changes and adapter activation shifts before and after LayerNorm.

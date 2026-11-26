@@ -112,14 +112,10 @@ def score_columns(dataset, raw, counts, norm, aggregate, bonus=None):
                                  ("two_sided", np.abs(values) + bonus))}
 
 
-def run_group(dataset, group, order, index, seed, args, functions, device, run, weights):
-    _, aggregate, reference, _, source = functions
-    cache_file = run / f"{group.name}.csv.gz"
+def fit_or_restore_head(dataset, group, index, seed, args, functions, device, weights):
+    _, _, reference, _, source = functions
     own_weights = weights / f"{group.name}.pt"
     adapter_path = weights / f"{group.name}_adapter.pt"
-    if cache_file.exists() and own_weights.is_file() and adapter_path.is_file():
-        print(f"SKIP {dataset}/{group.name}/{seed}", flush=True)
-        return pd.read_csv(cache_file, dtype={"key": str})
     print(f"{dataset} seed={seed} group={group.name} fit={group.train.shape} eval={group.values.shape}", flush=True)
     effective_seed = seed + (1009 * index if dataset == "Z24" else 0)
     prior = None
@@ -156,6 +152,17 @@ def run_group(dataset, group, order, index, seed, args, functions, device, run, 
     args.train_log, args.reference_log = [], []
     head = TargetedHead(scorer, group.train, group.reference, effective_seed, args, group.name,
                         adapter_path, prior_adapter=prior_adapter)
+    return scorer, head, norm
+
+
+def run_group(dataset, group, order, index, seed, args, functions, device, run, weights):
+    _, aggregate, _, _, source = functions
+    cache_file = run / f"{group.name}.csv.gz"
+    if (cache_file.is_file() and (weights / f"{group.name}.pt").is_file()
+            and (weights / f"{group.name}_adapter.pt").is_file()):
+        print(f"SKIP {dataset}/{group.name}/{seed}", flush=True)
+        return pd.read_csv(cache_file, dtype={"key": str})
+    scorer, head, norm = fit_or_restore_head(dataset, group, index, seed, args, functions, device, weights)
     for filename, entries in (("adapter_training", args.train_log), ("gain_reference", args.reference_log)):
         if entries:
             atomic_csv(pd.DataFrame(entries), run / f"{group.name}_{filename}.csv")
@@ -211,9 +218,7 @@ def run_group(dataset, group, order, index, seed, args, functions, device, run, 
     return frame
 
 
-def run_dataset(dataset, groups, args, device, functions):
-    out = args.output / dataset
-    out.mkdir(parents=True, exist_ok=True)
+def sensor_orders(dataset, groups, args, out, fit_scorer):
     reference_dirs = []
     if args.previous_clmm_weights is not None:
         reference_dirs.append(args.previous_clmm_weights.parent / "reports")
@@ -232,7 +237,14 @@ def run_dataset(dataset, groups, args, device, functions):
         atomic_csv(order_table, out / "sensor_removal_order.csv")
         print(f"{dataset} sensor order restored from {order_path}", flush=True)
     else:
-        orders = build_plan(groups, functions[0], out)
+        orders = build_plan(groups, fit_scorer, out)
+    return orders
+
+
+def run_dataset(dataset, groups, args, device, functions):
+    out = args.output / dataset
+    out.mkdir(parents=True, exist_ok=True)
+    orders = sensor_orders(dataset, groups, args, out, functions[0])
     artifacts.export_inputs(dataset, groups, orders, args, out)
     masks = []
     for group in groups:
@@ -289,6 +301,22 @@ def run_dataset(dataset, groups, args, device, functions):
     return summarize(out, dataset, paths), combined
 
 
+def targeted_protocol(args):
+    protocol = dict(
+        design="targeted post-block gain head", epochs=args.epochs, adapter_epochs=args.adapter_epochs,
+        batch_size=args.batch_size, smoke_window_limit=args.smoke_window_limit, strength=args.strength,
+        gain_weight=args.gain_weight, z24_points=512, hellbridge_points=128,
+        gain_reference="healthy per-count reference at original 10/30/50%; exact-mask healthy median otherwise",
+        hellbridge_reference="20 healthy validation windows; no test windows",
+        score_tail="shared native TimesNet direction and Q90 from clean, fixed across all masks",
+        z24_two_sided="median(abs(standardized adapted MSE) + gain bonus) over windows",
+        hellbridge_gain="monotone transform back to native window MSE scale",
+    )
+    if args.center_gain:
+        protocol["gain_centering"] = "subtract the healthy aggregate gain median under the identical mask"
+    return protocol
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--z24-root", required=True, type=Path)
@@ -313,18 +341,7 @@ def main():
     args.methods = (*METHODS, CENTERED_METHOD) if args.center_gain else METHODS
     args.output.mkdir(parents=True, exist_ok=True)
     args.weights_dir.mkdir(parents=True, exist_ok=True)
-    args.protocol = dict(
-        design="targeted post-block gain head", epochs=args.epochs, adapter_epochs=args.adapter_epochs,
-        batch_size=args.batch_size, smoke_window_limit=args.smoke_window_limit, strength=args.strength,
-        gain_weight=args.gain_weight, z24_points=512, hellbridge_points=128,
-        gain_reference="healthy per-count reference at original 10/30/50%; exact-mask healthy median otherwise",
-        hellbridge_reference="20 healthy validation windows; no test windows",
-        score_tail="shared native TimesNet direction and Q90 from clean, fixed across all masks",
-        z24_two_sided="median(abs(standardized adapted MSE) + gain bonus) over windows",
-        hellbridge_gain="monotone transform back to native window MSE scale",
-    )
-    if args.center_gain:
-        args.protocol["gain_centering"] = "subtract the healthy aggregate gain median under the identical mask"
+    args.protocol = targeted_protocol(args)
     for folder in (args.output, args.weights_dir):
         protocol = folder / "protocol.json"
         if protocol.is_file() and json.loads(protocol.read_text(encoding="utf-8")) != args.protocol:

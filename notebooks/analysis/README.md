@@ -19,3 +19,7 @@ Save each shard's `weights` directory and report ZIP before the session is disca
 [Centered gain-head ablation](kaggle_centered_gain_head.py) compares the original gain head against a version that subtracts the healthy median for the same mask. The cell can reuse the original CLMM checkpoints and writes paired differences with the clean threshold frozen.
 
 [Gain head trừ trung vị healthy](kaggle_centered_gain_head.py) so sánh hai đầu điểm trên cùng checkpoint và mask. Cell tái sử dụng checkpoint CLMM nếu có và lưu chênh lệch theo từng seed tại ngưỡng clean cố định.
+
+[Original gain-head layer audit](kaggle_old_gain_diagnostics.py) reports the original score on four benchmark masks and logs layer separability, period selection and the adapter shift before and after LayerNorm.
+
+[Chẩn đoán từng lớp của gain head gốc](kaggle_old_gain_diagnostics.py) in điểm phát hiện trên bốn mức mất sensor và ghi độ tách healthy/damage, thay đổi bin FFT và độ dịch qua adapter và LayerNorm.

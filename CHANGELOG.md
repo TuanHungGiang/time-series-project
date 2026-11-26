@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added layer and score diagnostics for the original CLMM gain head under the benchmark masks.
+
 - Added a healthy-median centered gain-head ablation and a Kaggle launcher for the targeted masks.
 
 - Display and export CNN-AE metrics as mean ± sample standard deviation across seeds.
