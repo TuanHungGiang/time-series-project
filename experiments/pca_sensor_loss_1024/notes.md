@@ -34,6 +34,14 @@ Both representations use the same observed-channel PCA-SPE calculation.
 The report shows the paired AUC difference and how that difference changes from
 the clean condition, along with a heatmap by damage state.
 
+Run the Welch power ablation with
+`python -m clmm_timesnet.pca_z24_welch_power_ablation --z24 <input> --out <folder>`.
+It compares the original centered 32-band representation with absolute log-band
+power and mean log power alone, with time-domain controls. The mean log power is
+the exact offset removed by band centering. Both validation classes receive the
+original mask schedule, and validation AUC is reported separately from the
+exploratory test results. The PCA estimators still use healthy training data.
+
 ## Tiếng Việt
 
 Chạy bộ kiểm tra PCA-SPE ở 1.024 điểm trên hai cầu bằng lệnh đầu, hoặc đưa ZIP
@@ -49,3 +57,8 @@ AUC theo trạng thái hư hỏng và biểu đồ AUC cho hai cầu.
 Lệnh Z24 tiếp theo so sánh PCA có mask trên tín hiệu miền thời gian và đặc trưng
 phổ Welch 32 dải từ 0,5 đến 30 Hz. Báo cáo ghi cả chênh lệch AUC theo từng mask
 và mức thay đổi của chênh lệch so với đầu vào đủ sensor, kèm heatmap theo trạng thái.
+
+Lệnh kiểm tra mức công suất so sánh ba cách biểu diễn từ cùng 32 dải Welch, gồm
+hình dạng phổ, phổ log giữ mức công suất và mức công suất riêng. Cùng split và
+mask được dùng cho các đối chứng miền thời gian. AUC trên validation và test được
+báo cáo riêng.
