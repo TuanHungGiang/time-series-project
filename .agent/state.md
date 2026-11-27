@@ -1,5 +1,7 @@
 # Current research state
 
+The full-response 1,024-point PCA-SPE run evaluates Z24 and HellBridge with thirty nested mask orders at each of 10%, 30%, 50%, 70%, and 90% whole-device loss. A companion diagnostic reconstructs healthy–damage pair rank changes and decomposes alarm changes from saved scores under the frozen and recalibrated thresholds. Commands are in `experiments/pca_sensor_loss_1024/notes.md`.
+
 Saved matched benchmark reports now support reproducible decision-margin and damage-state transition figures, with sampled Z24 time-window scores when available. The plotting module validates its decisions against the saved validation thresholds and metrics before exporting figures and audit CSVs.
 
 The matched audit also supports full-response Z24 inputs, including fixed reference channels. It derives the channel roster from healthy training acquisitions and performs nested whole-position removal on the 18 setup–excitation groups. It logs naturally unavailable axes and realized site and axis loss. The experiment command is in `experiments/matched_resolution_gap/notes.md`.

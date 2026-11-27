@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a full-response 1,024-point PCA-SPE benchmark and figures explaining paired ranking and threshold-dependent alarm changes through 90% whole-device loss.
+
 - Plot test decisions relative to validation thresholds, alarm transitions by damage state, and the sampled Z24 scores underlying selected record decisions.
 
 - Add full-response Z24 inputs with fixed references, whole-location nested removal, and separate logging of natural and simulated missingness.
