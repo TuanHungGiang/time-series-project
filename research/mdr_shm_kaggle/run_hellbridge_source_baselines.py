@@ -137,7 +137,7 @@ def model_forward(name: str, model: nn.Module, batch: torch.Tensor) -> torch.Ten
 
 
 def fit_reconstructor(name: str, fit: np.ndarray, epochs: int, batch_size: int,
-                      device: torch.device) -> nn.Module:
+                      device: torch.device, epoch_callback=None) -> nn.Module:
     channels, length = fit.shape[1:]
     constructors = {
         "lstm_ae": lambda: LSTMAE(channels, length),
@@ -160,7 +160,9 @@ def fit_reconstructor(name: str, fit: np.ndarray, epochs: int, batch_size: int,
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
-        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if epoch_callback is not None:
+            epoch_callback(epoch, np.mean(losses), model)
+        elif os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} loss={np.mean(losses):.6f}", flush=True)
     return model.eval()
 
@@ -274,7 +276,7 @@ def temporal_edge(length: int, radius: int = 2) -> torch.Tensor:
     return torch.as_tensor(pairs, dtype=torch.long).T.contiguous()
 
 
-def fit_scatterad(fit: np.ndarray, epochs: int, device: torch.device):
+def fit_scatterad(fit: np.ndarray, epochs: int, device: torch.device, epoch_callback=None):
     try:
         from third_party.scatterad import Model
     except ImportError as error:
@@ -296,7 +298,9 @@ def fit_scatterad(fit: np.ndarray, epochs: int, device: torch.device):
             optimizer.step()
             model.update_target()
             losses.append(float(loss.detach().cpu()))
-        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if epoch_callback is not None:
+            epoch_callback(epoch, np.mean(losses), model, edges=edge)
+        elif os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} scatter_loss={np.mean(losses):.6f}", flush=True)
     return model.eval(), edge
 
