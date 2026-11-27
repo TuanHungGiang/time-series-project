@@ -75,3 +75,5 @@ The whitening seed sweep uses the packaged two-bridge pilot with the original hy
 The matched three-seed baseline pilot reuses the native whitening split, 1,024-point preprocessing, and masks 300–304 on both bridges. It reports the six neural baselines and a deterministic PCA-SPE run with mask-matched and clean-frozen calibration. Results are pending.
 
 The Kaggle baseline launcher logs training loss at each epoch and saves per-seed training curves. Archived notebook logs support plotting the recorded epochs only.
+
+The one-seed baseline diagnostic repeats the matched protocol and evaluates each training objective on held-out healthy reference windows after every epoch. The alarm calibration and test partitions remain separate.
