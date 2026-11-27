@@ -77,3 +77,5 @@ The matched three-seed baseline pilot reuses the native whitening split, 1,024-p
 The Kaggle baseline launcher logs training loss at each epoch and saves per-seed training curves. Archived notebook logs support plotting the recorded epochs only.
 
 The one-seed baseline diagnostic repeats the matched protocol and evaluates each training objective on held-out healthy reference windows after every epoch. The alarm calibration and test partitions remain separate.
+
+The paper-figure launcher reads complete CLMM score reports to plot damage-state recall and threshold-centered score distributions without training. Optional waveform reconstruction runs only the selected Z24 and HellBridge groups.
