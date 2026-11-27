@@ -26,14 +26,18 @@ METRIC_KEYS = ["dataset", "orientation", "policy", "loss"]
 STATE_KEYS = ["dataset", "orientation", "state", "loss"]
 
 
-def log_band_shape(windows):
+def log_band_power(windows):
     freqs, density = welch(
         windows, fs=SAMPLE_RATE, window="hann", nperseg=WELCH_SEGMENT,
         noverlap=WELCH_SEGMENT // 2, detrend=False, scaling="density", axis=-1,
     )
     start, stop = np.searchsorted(freqs, BAND_EDGES[:-1]), np.searchsorted(freqs, BAND_EDGES[1:])
     power = np.stack([density[..., low:high].mean(axis=-1) for low, high in zip(start, stop)], axis=-1)
-    log_power = np.log10(np.maximum(power, np.finfo(np.float32).tiny))
+    return np.log10(np.maximum(power, np.finfo(np.float32).tiny))
+
+
+def log_band_shape(windows):
+    log_power = log_band_power(windows)
     return log_power - log_power.mean(axis=-1, keepdims=True)
 
 
