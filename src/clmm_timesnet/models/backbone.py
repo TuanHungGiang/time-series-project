@@ -32,7 +32,7 @@ def reconstruct(model, windows):
     return model(windows.transpose(1, 2), None, None, None).transpose(1, 2)
 
 
-def fit_timesnet(fit, epochs, batch_size, device):
+def fit_timesnet(fit, epochs, batch_size, device, epoch_callback=None):
     channels, length = fit.shape[1:]
     model = TimesNet(timesnet_config(channels, length)).to(device)
     loader = DataLoader(TensorDataset(torch.from_numpy(fit)), batch_size=batch_size, shuffle=True)
@@ -48,6 +48,8 @@ def fit_timesnet(fit, epochs, batch_size, device):
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(float(loss.detach()))
-        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if epoch_callback is not None:
+            epoch_callback(epoch, np.mean(losses), model)
+        elif os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} loss={np.mean(losses):.6f}", flush=True)
     return model.eval().requires_grad_(False)
