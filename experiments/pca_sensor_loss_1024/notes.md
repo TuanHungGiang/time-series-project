@@ -25,6 +25,15 @@ methods, and the upper-tail analysis is also exported. Thresholds are compared
 under both the clean-frozen and mask-matched healthy validation policies.
 Reports include paired mask-level deltas, AUC by damage state, and an AUC figure.
 
+Run the Z24 representation comparison with
+`python -m clmm_timesnet.pca_z24_spectral_comparison --z24 <input> --out <folder>`.
+The original 1,024-point windows feed either the time-domain scorer or a
+per-channel Welch spectrum with 32 log-power bands between 0.5 and 30 Hz.
+The spectral features are centered per window and channel to retain spectral shape.
+Both representations use the same observed-channel PCA-SPE calculation.
+The report shows the paired AUC difference and how that difference changes from
+the clean condition, along with a heatmap by damage state.
+
 ## Tiếng Việt
 
 Chạy bộ kiểm tra PCA-SPE ở 1.024 điểm trên hai cầu bằng lệnh đầu, hoặc đưa ZIP
@@ -36,3 +45,7 @@ Lệnh phân tích tiếp theo đối chiếu cách điền 0 với phép chiế
 và PCA fit lại trên đúng nhóm kênh đó. Ba cách dùng chung split, cửa sổ 1.024
 điểm, mask và dữ liệu healthy train. Kết quả gồm chênh lệch theo từng mask,
 AUC theo trạng thái hư hỏng và biểu đồ AUC cho hai cầu.
+
+Lệnh Z24 tiếp theo so sánh PCA có mask trên tín hiệu miền thời gian và đặc trưng
+phổ Welch 32 dải từ 0,5 đến 30 Hz. Báo cáo ghi cả chênh lệch AUC theo từng mask
+và mức thay đổi của chênh lệch so với đầu vào đủ sensor, kèm heatmap theo trạng thái.
