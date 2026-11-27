@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a three-seed baseline pilot using the same 1,024-point inputs, nested sensor masks, and alarm calibration as CLMM whitening.
+
 - Added the resumable ten-seed experiment for paired CLMM whitening on both bridges.
 
 - Restored the selected baseline roster in the archived reporting table after removing USAD.
