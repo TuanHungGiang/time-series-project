@@ -3,6 +3,7 @@
 import argparse
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def fit_tranad(source, values, epochs, batch_size, device):
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(batch_loss.item())
-        if epoch in (1, epochs):
+        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch in (1, epochs):
             print(f"  epoch={epoch}/{epochs} tranad_loss={np.mean(losses):.6f}", flush=True)
     return Scorer(source, "tranad", model.eval(), 1, device, (normalizer.low, normalizer.high))
 
