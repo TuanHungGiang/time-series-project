@@ -34,7 +34,7 @@ def checkout(name, commit):
     return path
 
 
-repo = checkout("clmm", "b954dc834585652a2d10f395f9815eeb3c5950aa")
+repo = checkout("clmm", "d732e06b2e3670d6b1f22ec6939234d642d5d8d1")
 archive = checkout("baseline_source", "9f6e24b785e51462c5bfc93e2a06d8ca0df1e2df")
 try:
     from torch_geometric.nn import GATConv
