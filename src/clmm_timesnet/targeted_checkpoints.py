@@ -102,7 +102,8 @@ class Scorer:
         return np.concatenate(pieces)
 
 
-def fit_scorer(source, name, values, epochs, batch_size, device):
+def fit_scorer(source, name, values, epochs, batch_size, device, epoch_callback=None):
+    callback_options = {} if epoch_callback is None else {"epoch_callback": epoch_callback}
     scale = source.FitMinMax(values) if name in ("usad", "tranad") else None
     fit = scale.transform(values) if scale is not None else values
     scaler = (scale.low, scale.high) if scale is not None else None
@@ -112,11 +113,11 @@ def fit_scorer(source, name, values, epochs, batch_size, device):
     elif name == "usad":
         state = source.fit_usad(fit, epochs, batch_size, device)
     elif name == "scatterad":
-        state, edges = source.fit_scatterad(fit, epochs, device)
+        state, edges = source.fit_scatterad(fit, epochs, device, **callback_options)
     elif name == cnn_ae_1d.MODEL_ID:
-        state = cnn_ae_1d.fit(fit, epochs, batch_size, device)
+        state = cnn_ae_1d.fit(fit, epochs, batch_size, device, **callback_options)
     else:
-        state = source.fit_reconstructor(name, fit, epochs, batch_size, device)
+        state = source.fit_reconstructor(name, fit, epochs, batch_size, device, **callback_options)
     scorer = Scorer(source, name, state, batch_size, device, scaler, edges)
     if name == "scatterad":
         inputs = values[:min(3, len(values))]
