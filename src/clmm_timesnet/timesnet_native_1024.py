@@ -90,7 +90,7 @@ def fit_with_dropout(fit, args, seed, device, method):
 
 
 class Detector:
-    def __init__(self, fit, reference, seed, args, device, method="native"):
+    def __init__(self, fit, reference, seed, args, device, method="native", epoch_callback=None):
         self.method = method
         self.device = device
         self.batch_size = args.batch_size
@@ -99,7 +99,7 @@ class Detector:
         seed_everything(seed)
         fit = self.scaler.transform(fit)
         if method == "native":
-            self.model = fit_timesnet(fit, args.epochs, self.batch_size, device)
+            self.model = fit_timesnet(fit, args.epochs, self.batch_size, device, epoch_callback=epoch_callback)
         else:
             self.model = fit_with_dropout(fit, args, seed, device, method)
         self.reference_center = 0.0
