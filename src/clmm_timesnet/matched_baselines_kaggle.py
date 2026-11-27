@@ -9,12 +9,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from .data.hellbridge import Normalizer
 from .hellbridge_spectral_kaggle import calibration_report
 from .mask_pair_block import evaluate, native_score_direction, run_hellbridge, run_z24
 from .models.backbone import seed_everything
-from .targeted_checkpoints import fit_scorer
+from .targeted_checkpoints import Scorer, fit_scorer
 from .timesnet_native_1024 import Detector
 from .whitening_multiseed_kaggle import CONDITIONS, DATASETS, METRICS, SEEDS
 from .whitening_two_bridges_kaggle import INPUT, LENGTH, MASKS, Z24_INPUT
@@ -33,6 +35,31 @@ def native_scores(scorer, data):
     return np.log1p(values)
 
 
+def fit_tranad(source, values, epochs, batch_size, device):
+    normalizer = source.FitMinMax(values)
+    fit = normalizer.transform(values)
+    model = source.TranAD(*fit.shape[1:]).to(device)
+    loader = DataLoader(TensorDataset(torch.from_numpy(fit)), batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    for epoch in range(1, epochs + 1):
+        model.train()
+        losses = []
+        for (batch,) in loader:
+            optimizer.zero_grad(set_to_none=True)
+            batch_loss = torch.zeros((), device=device)
+            for sample in batch.split(1):
+                sample = sample.to(device)
+                loss = (sample - source.model_forward("tranad", model, sample)).square().mean()
+                (loss / len(batch)).backward()
+                batch_loss += loss.detach() / len(batch)
+            nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            optimizer.step()
+            losses.append(batch_loss.item())
+        if epoch in (1, epochs):
+            print(f"  epoch={epoch}/{epochs} tranad_loss={np.mean(losses):.6f}", flush=True)
+    return Scorer(source, "tranad", model.eval(), 1, device, (normalizer.low, normalizer.high))
+
+
 class BaselineBlock:
     def __init__(self, fit, reference, seed, args, device, group, source):
         self.columns = args.active_models
@@ -46,7 +73,10 @@ class BaselineBlock:
                 self.detector = Detector(fit, reference, seed, args, device)
                 continue
             seed_everything(seed)
-            scorer = fit_scorer(source, model, normalized_fit, args.epochs, args.batch_size, device)
+            if model == "tranad":
+                scorer = fit_tranad(source, normalized_fit, args.epochs, args.batch_size, device)
+            else:
+                scorer = fit_scorer(source, model, normalized_fit, args.epochs, args.batch_size, device)
             ref = native_scores(scorer, normalized_ref)
             center = np.median(ref)
             scale = max(1.4826 * np.median(np.abs(ref - center)), 0.25 * ref.std(), 1e-4)
@@ -155,9 +185,10 @@ def main():
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     protocol = dict(
-        version=1, models=MODELS, seeds=SEEDS[:3], pca_seeds=SEEDS[:1],
+        version=2, models=MODELS, seeds=SEEDS[:3], pca_seeds=SEEDS[:1],
         window_points=LENGTH, sample_rate_hz=100, masks=MASKS,
         epochs=EPOCHS, batch_size=BATCH_SIZE, z24_window_cap=Z24_WINDOWS,
+        tranad_microbatch=1,
         z24_root=str(args.z24_root), hell_h5=str(args.hell_h5), baseline_dir=str(args.baseline_dir),
         inputs="native CLMM split, vertical sensors, detrend, healthy fit z-score, zero-fill",
         model_scoring="native scores; fit-only additional min-max for TranAD; TimesNet observed MSE",
