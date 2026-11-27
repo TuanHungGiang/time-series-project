@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a one-seed diagnostic for training and held-out healthy loss on both bridges.
+
 - Added per-epoch training loss logs and Kaggle diagnostic figures for the matched baselines.
 
 - Added a three-seed baseline pilot using the same 1,024-point inputs, nested sensor masks, and alarm calibration as CLMM whitening.
