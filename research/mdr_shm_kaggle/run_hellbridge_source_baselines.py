@@ -9,6 +9,7 @@ are controlled here to prevent test-contamination and point adjustment.
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -159,7 +160,7 @@ def fit_reconstructor(name: str, fit: np.ndarray, epochs: int, batch_size: int,
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} loss={np.mean(losses):.6f}", flush=True)
     return model.eval()
 
@@ -195,7 +196,7 @@ def fit_usad(fit: np.ndarray, epochs: int, batch_size: int, device: torch.device
             loss2.backward()
             optimizer2.step()
             losses.append(float((loss1 + loss2).detach().cpu()))
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} usad_loss={np.mean(losses):.6f}", flush=True)
     return model.eval()
 
@@ -247,7 +248,7 @@ def fit_gdn(fit: np.ndarray, epochs: int, batch_size: int, device: torch.device)
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} gdn_loss={np.mean(losses):.6f}", flush=True)
     return model.eval(), edge, history
 
@@ -295,7 +296,7 @@ def fit_scatterad(fit: np.ndarray, epochs: int, device: torch.device):
             optimizer.step()
             model.update_target()
             losses.append(float(loss.detach().cpu()))
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} scatter_loss={np.mean(losses):.6f}", flush=True)
     return model.eval(), edge
 
@@ -448,4 +449,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
