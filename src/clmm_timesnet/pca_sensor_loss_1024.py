@@ -134,7 +134,7 @@ def fit_z24_group(train, group_name, detector_cls=PCASPE):
     return layout, detector, metadata
 
 
-def z24_scores(root, detector_cls=PCASPE):
+def z24_scores(root, detector_cls=PCASPE, *, mask_damage_validation=False):
     from clmm_timesnet.z24_full_sensors import response_labels
 
     manifest = load_manifest(root)
@@ -158,7 +158,8 @@ def z24_scores(root, detector_cls=PCASPE):
             score = detector.score_columns(select_windows(raw), present)
             base = dict(dataset="Z24", group=group_name, split=row.split, sample_id=row.record_id,
                         record_id=row.record_id, state=str(row.state), label=row.label)
-            for rate in RATES if row.split == "test" or row.label == 0 else (0,):
+            rates = RATES if row.split == "test" or row.label == 0 or mask_damage_validation else (0,)
+            for rate in rates:
                 for replicate in (0,) if rate == 0 else range(1, REPLICATES + 1):
                     keep = nested_keep(layout.site_of_axis, present, row.record_id, rate, replicate)
                     scores = {name: float(np.median(values)) for name, values in score(keep).items()}
