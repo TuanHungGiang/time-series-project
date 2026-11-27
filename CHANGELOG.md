@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a matched three-seed 128-point benchmark of CLMM whitening, baselines and ablations with optional native-resolution controls and paired sensor-loss reports.
+
 - Added a one-seed diagnostic for training and held-out healthy loss on both bridges.
 
 - Added per-epoch training loss logs and Kaggle diagnostic figures for the matched baselines.
