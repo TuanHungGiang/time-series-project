@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added manuscript figures from saved CLMM scores and optional one-seed waveform reconstruction.
+
 - Added a one-seed diagnostic for training and held-out healthy loss on both bridges.
 
 - Added per-epoch training loss logs and Kaggle diagnostic figures for the matched baselines.
