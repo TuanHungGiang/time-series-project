@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a matched Z24 comparison of native samples and Welch spectral shape under whole-sensor loss.
+
 - Compare zero-fill PCA-SPE, observed-only projection, and healthy subset refits under matched sensor loss on both bridges.
 
 - Add a full-response 1,024-point PCA-SPE benchmark and figures explaining paired ranking and threshold-dependent alarm changes through 90% whole-device loss.
