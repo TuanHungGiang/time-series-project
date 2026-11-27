@@ -60,8 +60,8 @@ class PCASPE:
         # Decompose squared distance and projected energy by axis. This is
         # algebraically the full zero-filled PCA-SPE reconstruction error.
         x = self.normalizer.transform(raw)
-        basis = self.model.components_.reshape(-1, x.shape[1], POINTS)
-        mean = self.model.mean_.reshape(x.shape[1], POINTS)
+        basis = self.model.components_.reshape(-1, *x.shape[1:])
+        mean = self.model.mean_.reshape(x.shape[1:])
         shifted_energy = np.einsum("nct,nct->nc", x, x, dtype=np.float64)
         shifted_energy -= 2 * np.einsum("nct,ct->nc", x, mean, dtype=np.float64)
         constant = np.sum(mean.astype(np.float64) ** 2)
@@ -70,7 +70,7 @@ class PCASPE:
             np.ascontiguousarray(basis.transpose(1, 2, 0)),
         ).transpose(1, 0, 2)
         mean_projection = self.model.mean_ @ self.model.components_.T
-        width = x.shape[1] * POINTS
+        width = self.model.n_features_in_
 
         def score(kept):
             norm = constant + shifted_energy[:, kept].sum(axis=1)
