@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Isolate mean Welch log power in the locked Z24 sensor-loss protocol and export matched validation and test AUC.
+
 - Add a matched Z24 comparison of native samples and Welch spectral shape under whole-sensor loss.
 
 - Compare zero-fill PCA-SPE, observed-only projection, and healthy subset refits under matched sensor loss on both bridges.
