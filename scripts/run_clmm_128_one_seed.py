@@ -1,4 +1,4 @@
-"""Run CLMM and its reference baselines on antialiased, 128-point bridge windows."""
+"""Run CLMM on antialiased, 128-point bridge windows with optional reference baselines."""
 
 import argparse
 import importlib
@@ -39,26 +39,32 @@ def load_reduced(loader):
 def run_bridge(bridge, config, device, source, out):
     from clmm_timesnet import hellbridge_spectral_kaggle as spectral
     from clmm_timesnet import mask_pair_block as window_protocol
-    from clmm_timesnet.matched_baselines_kaggle import BaselineBlock
     from clmm_timesnet.whitening_two_bridges_kaggle import Z24WhiteningAudit, orient_z24
 
     z24 = bridge == "Z24"
     audit_type = Z24WhiteningAudit if z24 else spectral.SpectralGainAudit
-    config.active_models = BASELINES
+    if source is None:
+        methods = (CLMM,)
+        make_block = audit_type
+    else:
+        from clmm_timesnet.matched_baselines_kaggle import BaselineBlock
 
-    class CombinedBlock:
-        def __init__(self, fit, reference, seed, args, accelerator, group):
-            print(f"  {group} | fit {fit.shape} | reference {reference.shape}", flush=True)
-            self.clmm = audit_type(fit, reference, seed, args, accelerator, group)
-            self.baselines = BaselineBlock(fit, reference, seed, args, accelerator, group, source)
-            self.columns = (*self.clmm.columns, *self.baselines.columns)
+        config.active_models = BASELINES
+        methods = METHODS
 
-        def prepare(self, raw):
-            (prepared,) = self.clmm.prepare(raw)
-            return (prepared,)
+        class CombinedBlock:
+            def __init__(self, fit, reference, seed, args, accelerator, group):
+                self.clmm = audit_type(fit, reference, seed, args, accelerator, group)
+                self.baselines = BaselineBlock(fit, reference, seed, args, accelerator, group, source)
+                self.columns = (*self.clmm.columns, *self.baselines.columns)
 
-        def scores(self, data, kept):
-            return np.column_stack((self.clmm.scores(data, kept), self.baselines.scores(data, kept)))
+            def prepare(self, raw):
+                return self.clmm.prepare(raw)
+
+            def scores(self, data, kept):
+                return np.column_stack((self.clmm.scores(data, kept), self.baselines.scores(data, kept)))
+
+        make_block = CombinedBlock
 
     out.mkdir(parents=True, exist_ok=True)
     # Keep the original window starts. Resample only after the native detrend.
@@ -74,31 +80,31 @@ def run_bridge(bridge, config, device, source, out):
         SAMPLE_HZ=RAW_HZ / factor,
     ):
         if z24:
-            rows, masks, fits = window_protocol.run_z24(config, device, make_block=CombinedBlock)
+            rows, masks, fits = window_protocol.run_z24(config, device, make_block=make_block)
         else:
-            rows, masks, fits = window_protocol.run_hellbridge(config, device, out, make_block=CombinedBlock)
+            rows, masks, fits = window_protocol.run_hellbridge(config, device, out, make_block=make_block)
 
     if z24:
         sign = orient_z24(rows)
         raw = pd.DataFrame(rows)
         signs = {model: window_protocol.native_score_direction(bridge, raw, baseline_method=model)
-                 for model in BASELINES}
+                 for model in BASELINES if model in methods}
         signs[CLMM] = sign
         for row in rows:
             for model, direction in signs.items():
                 row[model] *= direction
-        metrics = window_protocol.evaluate(bridge, rows, masks, fits, out, methods=METHODS)
+        metrics = window_protocol.evaluate(bridge, rows, masks, fits, out, methods=methods)
         selected = metrics.loc[metrics.policy.eq("masked_q90")]
         selected = selected.rename(columns={"recall_low_fpr": "diagnostic_recall"})
     else:
         scores = pd.DataFrame(rows)
-        if not np.isfinite(scores[list(METHODS)]).all().all():
+        if not np.isfinite(scores[list(methods)]).all().all():
             raise ValueError("Non-finite HellBridge scores")
         scores_path = out / "scores.csv.gz"
         scores.to_csv(scores_path, index=False)
         pd.DataFrame(masks).to_csv(out / "masks.csv", index=False)
         (out / "fit_groups.json").write_text(json.dumps(fits, indent=2), encoding="utf-8")
-        metrics, by_state = spectral.calibration_report(scores_path, methods=METHODS)
+        metrics, by_state = spectral.calibration_report(scores_path, methods=methods)
         by_state.to_csv(out / "alarms_by_damage_state.csv", index=False)
         metrics.to_csv(out / "metrics_by_mask.csv", index=False)
         selected = metrics.loc[metrics.alpha.eq(.05) & metrics.policy.eq("same_mask_calibration")]
@@ -112,19 +118,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--z24-root", type=Path, required=True)
     parser.add_argument("--hell-h5", type=Path, required=True)
-    parser.add_argument("--baseline-dir", type=Path, required=True)
+    parser.add_argument("--baseline-dir", type=Path)
+    parser.add_argument("--clmm-only", action="store_true", help="Reuse prior baseline results; fit and report only CLMM.")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args(argv)
-    for path in (args.z24_root / "metadata/records_manifest.csv", args.hell_h5,
-                 args.baseline_dir / "run_hellbridge_source_baselines.py"):
+    paths = [args.z24_root / "metadata/records_manifest.csv", args.hell_h5]
+    if not args.clmm_only:
+        if args.baseline_dir is None:
+            parser.error("--baseline-dir is required unless --clmm-only is selected.")
+        paths.append(args.baseline_dir / "run_hellbridge_source_baselines.py")
+    for path in paths:
         if not path.is_file():
             raise FileNotFoundError(path)
     if not torch.cuda.is_available():
         raise RuntimeError("Select a GPU under Kaggle Settings → Accelerator.")
     torch.set_num_threads(2)
     device = torch.device("cuda")
-    sys.path.insert(0, str(args.baseline_dir.resolve()))
-    source = importlib.import_module("run_hellbridge_source_baselines")
+    source = None
+    methods = (CLMM,) if args.clmm_only else METHODS
+    if not args.clmm_only:
+        sys.path.insert(0, str(args.baseline_dir.resolve()))
+        source = importlib.import_module("run_hellbridge_source_baselines")
     config = argparse.Namespace(
         z24_root=args.z24_root, hell_h5=args.hell_h5, seed=SEED, epochs=5, adapter_epochs=8,
         batch_size=8, z24_windows=8, strength=.50, gain_weight=.25, replicates=MASKS,
@@ -137,7 +151,7 @@ def main(argv=None):
         seed=SEED, raw_points=RAW_POINTS, model_points=POINTS, raw_hz=RAW_HZ,
         model_hz=RAW_HZ * POINTS / RAW_POINTS, duration_seconds=RAW_POINTS / RAW_HZ,
         resampling="linear detrend then scipy.signal.resample_poly(up=1, down=8)",
-        models=METHODS, masks=MASKS, epochs=config.epochs, adapter_epochs=config.adapter_epochs,
+        models=methods, masks=MASKS, epochs=config.epochs, adapter_epochs=config.adapter_epochs,
         batch_size=config.batch_size, diagnostic_fpr_limit={"Z24": 0.0, "HellBridge": .05},
         calibration="healthy mask-matched", summary="mean across masks of one training seed",
     )
@@ -149,7 +163,7 @@ def main(argv=None):
     per_mask = pd.concat(tables, ignore_index=True)
     keys = ["dataset", "seed", "points", "method", "condition"]
     conditions = {"clean": (0,), "sensor_0.10": MASKS, "sensor_0.30": MASKS, "sensor_0.50": MASKS}
-    expected = {(d, m, c, r) for d in ("Z24", "HellBridge") for m in METHODS
+    expected = {(d, m, c, r) for d in ("Z24", "HellBridge") for m in methods
                 for c, rep in conditions.items() for r in rep}
     found = set(per_mask[["dataset", "method", "condition", "replicate"]].itertuples(index=False, name=None))
     if expected != found or len(per_mask) != len(expected) or not np.isfinite(per_mask[list(METRICS)]).all().all():
