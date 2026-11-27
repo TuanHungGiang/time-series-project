@@ -13,6 +13,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from .baseline_validation import log_epoch, validation_callback
 from .data.hellbridge import Normalizer
 from .hellbridge_spectral_kaggle import calibration_report
 from .mask_pair_block import evaluate, native_score_direction, run_hellbridge, run_z24
@@ -36,7 +37,7 @@ def native_scores(scorer, data):
     return np.log1p(values)
 
 
-def fit_tranad(source, values, epochs, batch_size, device):
+def fit_tranad(source, values, epochs, batch_size, device, epoch_callback=None):
     normalizer = source.FitMinMax(values)
     fit = normalizer.transform(values)
     model = source.TranAD(*fit.shape[1:]).to(device)
@@ -56,7 +57,9 @@ def fit_tranad(source, values, epochs, batch_size, device):
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             losses.append(batch_loss.item())
-        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch in (1, epochs):
+        if epoch_callback is not None:
+            epoch_callback(epoch, np.mean(losses), model, transform=normalizer.transform)
+        elif os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch in (1, epochs):
             print(f"  epoch={epoch}/{epochs} tranad_loss={np.mean(losses):.6f}", flush=True)
     return Scorer(source, "tranad", model.eval(), 1, device, (normalizer.low, normalizer.high))
 
@@ -68,16 +71,26 @@ class BaselineBlock:
         self.models = {}
         print(f"{group} | {fit.shape=} {reference.shape=} {seed=}", flush=True)
         normalized_fit, normalized_ref = self.scaler.transform(fit), self.scaler.transform(reference)
+        loss_log = getattr(args, "epoch_losses", None)
         for model in self.columns:
             print(f"  fitting {model}", flush=True)
+            callback = None
+            if loss_log is not None and model != "pca_spe":
+                callback = validation_callback(loss_log, args.dataset, group, args.seed, model,
+                                               normalized_ref, args.batch_size, device, source)
             if model == NATIVE:
-                self.detector = Detector(fit, reference, seed, args, device)
+                self.detector = Detector(fit, reference, seed, args, device, epoch_callback=callback)
                 continue
             seed_everything(seed)
             if model == "tranad":
-                scorer = fit_tranad(source, normalized_fit, args.epochs, args.batch_size, device)
+                scorer = fit_tranad(source, normalized_fit, args.epochs, args.batch_size, device,
+                                    epoch_callback=callback)
             else:
-                scorer = fit_scorer(source, model, normalized_fit, args.epochs, args.batch_size, device)
+                scorer = fit_scorer(source, model, normalized_fit, args.epochs, args.batch_size, device,
+                                    epoch_callback=callback)
+            if loss_log is not None and model == "pca_spe":
+                log_epoch(loss_log, args.dataset, group, args.seed, model, 0,
+                          scorer(normalized_fit).mean(), scorer(normalized_ref).mean(), len(reference), "MSE")
             ref = native_scores(scorer, normalized_ref)
             center = np.median(ref)
             scale = max(1.4826 * np.median(np.abs(ref - center)), 0.25 * ref.std(), 1e-4)
@@ -103,6 +116,7 @@ class BaselineBlock:
 
 def run_dataset(dataset, seed, args, device, source, out):
     args.seed = seed
+    args.dataset = dataset
     args.active_models = MODELS if seed == SEEDS[0] else tuple(m for m in MODELS if m != "pca_spe")
 
     def make_block(fit, ref, group_seed, options, accelerator, group):
