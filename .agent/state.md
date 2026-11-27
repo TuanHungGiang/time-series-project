@@ -1,5 +1,7 @@
 # Current research state
 
+The PCA-SPE follow-up compares zero-filled scoring, projection from observed channels, and healthy-only PCA refitted on each retained subset. It preserves the original two-bridge split and mask schedules, and reports paired AUC changes overall and by damage state. New two-bridge results are pending. See `experiments/pca_sensor_loss_1024/notes.md`.
+
 The full-response 1,024-point PCA-SPE run evaluates Z24 and HellBridge with thirty nested mask orders at each of 10%, 30%, 50%, 70%, and 90% whole-device loss. A companion diagnostic reconstructs healthy–damage pair rank changes and decomposes alarm changes from saved scores under the frozen and recalibrated thresholds. Commands are in `experiments/pca_sensor_loss_1024/notes.md`.
 
 Saved matched benchmark reports now support reproducible decision-margin and damage-state transition figures, with sampled Z24 time-window scores when available. The plotting module validates its decisions against the saved validation thresholds and metrics before exporting figures and audit CSVs.
