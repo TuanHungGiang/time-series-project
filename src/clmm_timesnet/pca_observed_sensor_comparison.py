@@ -35,10 +35,10 @@ class MaskComparison(PCASPE):
             (norm - self.refit_mean).transpose(1, 0, 2)
         )
         self.basis = np.ascontiguousarray(
-            self.model.components_.reshape(-1, norm.shape[1], POINTS).transpose(1, 0, 2),
+            self.model.components_.reshape(-1, *norm.shape[1:]).transpose(1, 0, 2),
             dtype=np.float64,
         )
-        self.full_mean = self.model.mean_.reshape(norm.shape[1], POINTS)
+        self.full_mean = self.model.mean_.reshape(norm.shape[1:])
         self.axis_basis_gram = self.basis @ self.basis.transpose(0, 2, 1)
         self.axis_train_gram = self.centered_train @ self.centered_train.transpose(0, 2, 1)
         self.mask_models = {}
@@ -90,7 +90,7 @@ class MaskComparison(PCASPE):
 
             projection = refit_cross[keep].sum(axis=0) @ dual_basis
             refit = refit_energy[keep].sum(axis=0) - np.einsum("nk,nk->n", projection, projection)
-            width = int(keep.sum()) * POINTS
+            width = int(keep.sum()) * raw.shape[-1]
             return {
                 "spe_score": standard,
                 "observed_spe": self.orient_neutral(observed / width),
@@ -100,12 +100,12 @@ class MaskComparison(PCASPE):
         return columns
 
 
-def evaluate(data, dataset):
+def evaluate(data, dataset, methods=METHODS):
     validation = data.loc[data["split"].eq("val") & data["loss"].eq(0)]
     sign = -1 if dataset == "Z24" and roc_auc_score(validation.label, validation.spe_score) < .5 else 1
     metrics, states = [], []
-    metadata = data.drop(columns=list(METHODS))
-    for column, method in METHODS.items():
+    metadata = data.drop(columns=list(methods))
+    for column, method in methods.items():
         scores = metadata.assign(spe_score=data[column])
         metrics.append(measure(scores, dataset, prior_sign=sign).assign(method=method))
         test = scores.loc[scores["split"].eq("test")]
@@ -122,9 +122,9 @@ def evaluate(data, dataset):
     return pd.concat(metrics, ignore_index=True), pd.DataFrame(states)
 
 
-def paired_deltas(metrics, keys, fields):
-    baseline = metrics.loc[metrics.method.eq("zero_fill"), [*keys, *fields]]
-    alternative = metrics.loc[metrics.method.ne("zero_fill")]
+def paired_deltas(metrics, keys, fields, reference="zero_fill"):
+    baseline = metrics.loc[metrics.method.eq(reference), [*keys, *fields]]
+    alternative = metrics.loc[metrics.method.ne(reference)]
     paired = alternative.merge(baseline, on=keys, suffixes=("", "_baseline"), validate="many_to_one")
     for field in fields:
         paired[f"delta_{field}"] = paired[field] - paired[f"{field}_baseline"]
