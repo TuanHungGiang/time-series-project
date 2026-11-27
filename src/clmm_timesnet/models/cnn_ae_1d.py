@@ -50,7 +50,7 @@ class ConvAutoencoder1D(nn.Module):
         return self.output(decoded)
 
 
-def fit(values, epochs, batch_size, device):
+def fit(values, epochs, batch_size, device, epoch_callback=None):
     if values.shape[-1] % 4:
         raise ValueError("CNN-AE window lengths must be divisible by 4")
     model = ConvAutoencoder1D(values.shape[1]).to(device)
@@ -66,7 +66,9 @@ def fit(values, epochs, batch_size, device):
             loss.backward()
             optimizer.step()
             losses.append(loss.detach())
-        if os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
+        if epoch_callback is not None:
+            epoch_callback(epoch, torch.stack(losses).mean().item(), model)
+        elif os.environ.get("CLMM_LOG_EACH_EPOCH") == "1" or epoch == 1 or epoch == epochs or epoch % 5 == 0:
             print(f"  epoch={epoch}/{epochs} loss={torch.stack(losses).mean().item():.6f}", flush=True)
     return model.eval()
 
