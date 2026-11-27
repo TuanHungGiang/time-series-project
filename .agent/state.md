@@ -73,3 +73,5 @@ The active comparison uses the retained baseline roster. It reuses archived scor
 The whitening seed sweep uses the packaged two-bridge pilot with the original hyperparameters and mask IDs 300–304. The ten-seed roster begins at 20270905. Each seed exports paired per-mask measurements for both threshold policies. Results are averaged over masks before aggregation over training seeds. Paired percentile intervals resample seeds on the fixed test split and mask set. Portable completed-seed checkpoints can be merged when their dataset fingerprints and protocol match. Multi-seed real-data results are pending.
 
 The matched three-seed baseline pilot reuses the native whitening split, 1,024-point preprocessing, and masks 300–304 on both bridges. It reports the six neural baselines and a deterministic PCA-SPE run with mask-matched and clean-frozen calibration. Results are pending.
+
+The Kaggle baseline launcher logs training loss at each epoch and saves per-seed training curves. Archived notebook logs support plotting the recorded epochs only.
