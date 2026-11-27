@@ -1,0 +1,23 @@
+{
+  "protocol_version": "model-a-v1",
+  "seed": 20261110,
+  "spectral_bins": 256,
+  "latent_dim": 64,
+  "hidden_dim": 128,
+  "epochs": 300,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "patience": 40,
+  "sensor_dropout_max": 0.50,
+  "spectral_noise_std_max": 0.20,
+  "frequency_block_mask_max": 0.40,
+  "loss_weights": {
+    "clean_reconstruction": 1.0,
+    "corrupted_reconstruction": 1.0,
+    "prediction_consistency": 0.25,
+    "latent_consistency": 0.10
+  },
+  "selection_uses_damage": false,
+  "threshold": "maximum_healthy_calibration_composite_score",
+  "reliability_threshold": "maximum_healthy_calibration_mc_uncertainty"
+}
