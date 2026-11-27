@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add full-response Z24 inputs with fixed references, whole-location nested removal, and separate logging of natural and simulated missingness.
+
 - Add a matched three-seed 128-point benchmark of CLMM whitening, baselines and ablations with optional native-resolution controls and paired sensor-loss reports.
 
 - Added a one-seed diagnostic for training and held-out healthy loss on both bridges.

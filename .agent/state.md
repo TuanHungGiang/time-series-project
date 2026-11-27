@@ -1,5 +1,7 @@
 # Current research state
 
+The matched audit also supports full-response Z24 inputs, including fixed reference channels. It derives the channel roster from healthy training acquisitions and performs nested whole-position removal on the 18 setup–excitation groups. It logs naturally unavailable axes and realized site and axis loss. The experiment command is in `experiments/matched_resolution_gap/notes.md`.
+
 The manuscript's matched sensor-loss audit now has a three-seed runner for CLMM-Net, the retained baselines and sequential ablations. It defaults to antialiased 128-point windows, with optional native 1,024-point runs. The runner records two validation-threshold policies, clean-to-loss changes, matched model deltas and within-group diagnostics. See `experiments/matched_resolution_gap/notes.md`. Real-data results are pending.
 
 The active model is CLMM–TimesNet with observed-key attention and time–frequency training loss. The target is healthy-only bridge damage detection with clean input and nested random sensor loss of 10%, 30%, and 50%. The experiment uses seed 20270905 on both bridges.

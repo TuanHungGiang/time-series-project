@@ -100,13 +100,16 @@ class ResidualAudit:
         values = torch.as_tensor(data, device=device)
         rng = np.random.default_rng(seed + 9613)
         channels = values.shape[1]
+        training_mask = getattr(args, "training_sensor_mask", None)
         optimizer = torch.optim.AdamW(self.adapter.parameters(), lr=1e-3, weight_decay=1e-5)
         self.adapter.train()
         for epoch in range(1, args.adapter_epochs + 1):
             for rate in RATES:
                 losses = []
                 for ids in torch.as_tensor(rng.permutation(len(values)), device=device).split(args.batch_size):
-                    kept = torch.as_tensor(sensor_mask(channels, rate, rng.permutation(channels)), device=device)
+                    available = (training_mask(rng, rate) if training_mask is not None
+                                 else sensor_mask(channels, rate, rng.permutation(channels)))
+                    kept = torch.as_tensor(available, device=device)
                     optimizer.zero_grad(set_to_none=True)
                     error, _ = self.error(values[ids], kept, enabled=True)
                     loss = error.mean()

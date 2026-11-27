@@ -25,6 +25,7 @@ from .data.z24 import load_manifest
 from .matched_baselines_kaggle import BaselineBlock, MODELS
 from .metrics import publication_metrics, recall_at_fpr, threshold_from_healthy
 from .whitening_two_bridges_kaggle import CANDIDATE, MASKS, METHODS, Z24WhiteningAudit, orient_z24
+from .z24_full_sensors import FullSensorWhiteningAudit, run_z24_full
 
 
 NATIVE, ADAPTER, GAIN, DIAGONAL, CLMM = METHODS
@@ -70,7 +71,9 @@ class MatchedModels:
         def train_backbone(*args):
             return detector_type(*args, epoch_callback=callback)
 
-        detector = Z24WhiteningAudit if config.dataset == "Z24" else spectral.SpectralGainAudit
+        detector = spectral.SpectralGainAudit
+        if config.dataset == "Z24":
+            detector = FullSensorWhiteningAudit if getattr(config, "z24_full_sensors", False) else Z24WhiteningAudit
         with patch.object(post_block_audit, "Detector", train_backbone):
             self.clmm = detector(fit, reference, seed, config, device, group)
         self.baselines = BaselineBlock(fit, reference, seed, config, device, group, source)
@@ -240,7 +243,8 @@ def run_bridge(config, device, source, out):
         SAMPLE_HZ=100 / factor,
     ):
         if config.dataset == "Z24":
-            rows, masks, fits = windows.run_z24(config, device, make_block=make_model)
+            run_z24 = run_z24_full if config.z24_full_sensors else windows.run_z24
+            rows, masks, fits = run_z24(config, device, make_block=make_model)
         else:
             rows, masks, fits = windows.run_hellbridge(config, device, out, make_block=make_model)
     scores, window_scores, polarity = orient_scores(rows, window_rows, config.dataset)
@@ -376,14 +380,25 @@ def git_head(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--z24-root", type=Path, required=True)
-    parser.add_argument("--hell-h5", type=Path, required=True)
+    parser.add_argument("--z24-root", type=Path)
+    parser.add_argument("--hell-h5", type=Path)
     parser.add_argument("--baseline-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--points", nargs="+", type=int, choices=(128, 1024), default=[128])
+    parser.add_argument("--datasets", nargs="+", choices=tuple(COHORTS), default=list(COHORTS))
+    parser.add_argument("--z24-full-sensors", action="store_true")
     args = parser.parse_args()
-    for path in (args.hell_h5, args.z24_root / "metadata/records_manifest.csv",
-                 args.baseline_dir / "run_hellbridge_source_baselines.py"):
+    if ("Z24" in args.datasets and args.z24_root is None) or (
+        "HellBridge" in args.datasets and args.hell_h5 is None
+    ):
+        parser.error("Pass the local dataset path for each selected bridge.")
+    if len(args.datasets) != len(set(args.datasets)):
+        parser.error("Pass each bridge only once.")
+    manifest_path = args.z24_root / "metadata/records_manifest.csv" if "Z24" in args.datasets else None
+    hell_path = args.hell_h5 if "HellBridge" in args.datasets else None
+    for path in (hell_path, manifest_path, args.baseline_dir / "run_hellbridge_source_baselines.py"):
+        if path is None:
+            continue
         if not path.is_file():
             raise FileNotFoundError(path)
     if not torch.cuda.is_available():
@@ -396,12 +411,13 @@ def main():
     source = importlib.import_module("run_hellbridge_source_baselines")
     from torch_geometric.nn import GATConv  # noqa: F401
 
-    manifest = load_manifest(args.z24_root)
-    damage = manifest.loc[manifest.label.eq(1)]
-    if manifest.record_id.duplicated().any() or set(damage.loc[damage.split.eq("val"), "state"]) & set(
-        damage.loc[damage.split.eq("test"), "state"]
-    ):
-        raise ValueError("Z24 has duplicate records or shared validation and test damage states")
+    if manifest_path is not None:
+        manifest = load_manifest(args.z24_root)
+        damage = manifest.loc[manifest.label.eq(1)]
+        if manifest.record_id.duplicated().any() or set(damage.loc[damage.split.eq("val"), "state"]) & set(
+            damage.loc[damage.split.eq("test"), "state"]
+        ):
+            raise ValueError("Z24 has duplicate records or shared validation and test damage states")
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda:0")
@@ -409,13 +425,18 @@ def main():
         z24_root=args.z24_root, hell_h5=args.hell_h5, epochs=5, adapter_epochs=8, batch_size=8,
         z24_windows=8, strength=.50, gain_weight=.25, replicates=MASKS, layer_probe=False,
         segment_consensus=False, residual_whitening=True, active_models=BASELINES,
+        z24_full_sensors=args.z24_full_sensors,
     )
     protocol = dict(
         repo_commit=git_head(Path(__file__).parent), source_commit=git_head(args.baseline_dir),
-        z24_manifest_sha256=sha256((args.z24_root / "metadata/records_manifest.csv").read_bytes()).hexdigest(),
-        z24_root=str(args.z24_root.resolve()), hell_h5=str(args.hell_h5.resolve()),
-        hell_file_bytes=args.hell_h5.stat().st_size, hell_modified_ns=args.hell_h5.stat().st_mtime_ns,
-        seeds=SEEDS, models=REPORT_MODELS, masks=MASKS, resolutions=args.points,
+        z24_manifest_sha256=sha256(manifest_path.read_bytes()).hexdigest() if manifest_path else None,
+        z24_root=str(args.z24_root.resolve()) if manifest_path else None,
+        hell_h5=str(hell_path.resolve()) if hell_path else None,
+        hell_file_bytes=hell_path.stat().st_size if hell_path else None,
+        hell_modified_ns=hell_path.stat().st_mtime_ns if hell_path else None,
+        seeds=SEEDS, models=REPORT_MODELS, masks=MASKS, resolutions=args.points, datasets=args.datasets,
+        z24_channels="all response axes, training roster; whole-site loss" if args.z24_full_sensors
+        else "stable vertical channels without references; channel loss",
         raw_hz=100, raw_points=1024, downsampling="detrend then polyphase antialias",
         epochs=config.epochs, adapter_epochs=config.adapter_epochs, batch_size=config.batch_size,
         no_overlap=True, weighting="mean over masks within seed, then sample SD over seeds",
@@ -430,15 +451,16 @@ def main():
         raise ValueError("Output belongs to a different protocol. Use a different output directory.")
     protocol_path.write_text(resolved, encoding="utf-8")
     print(resolved, flush=True)
-    manifest[["record_id", "setup", "excitation", "split", "state", "label"]].to_csv(
-        out / "z24_split_inventory.csv", index=False,
-    )
+    if manifest_path is not None:
+        manifest[["record_id", "setup", "excitation", "split", "state", "label"]].to_csv(
+            out / "z24_split_inventory.csv", index=False,
+        )
     shards = []
     for points in args.points:
         config.points = points
         for seed in SEEDS:
             config.seed = seed
-            for dataset in COHORTS:
+            for dataset in args.datasets:
                 config.dataset = dataset
                 shard = out / f"points_{points}" / f"seed_{seed}" / dataset
                 shards.append(shard)

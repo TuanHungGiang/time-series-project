@@ -13,8 +13,14 @@ The split, detrending, resampling, fit-based standardization and test mask are s
 
 Use the paired seed deltas to check whether the reduction repeats across the three seeds. Compare recall with FPR at the validation threshold and use diagnostic recall to examine the test ROC at its specified FPR limit. Both summaries are conditional on the fixed test cohorts and selected masks.
 
+## All structural response channels on Z24
+
+Pass `--datasets Z24 --z24-full-sensors` to add all measured response axes, including the five fixed reference channels at R1, R2 and R3. The healthy training MAT files define the roster within each setup and excitation. The drive-point force inputs are omitted. Most setups have 33 response channels at 20 positions, and setup 05 has 27 at 18 positions. A position is grouped by its physical sensor code before the axis suffix. Each nested removal masks every measured axis at the selected positions, with the denominator defined by the positions available in the source record. Clean records retain their original availability. The mask log records naturally missing axes, physical locations removed, and the realized rates at both the location and channel levels. The adapter is fitted with healthy whole-position masks. Its gain-reference medians extend to the unseen missing-axis counts using healthy reference windows.
+
 ## Tiếng Việt
 
 Thí nghiệm đối chiếu CLMM-Net, bảy baseline và các bước ablation trên Z24 và HellBridge. Mặc định dùng 128 điểm sau lọc chống alias và giảm mẫu, với ba seed, cùng split và cùng mask lồng nhau ở 10%, 30% và 50%. Chạy thêm 1.024 điểm bằng tùy chọn `--points 128 1024` để kiểm tra ảnh hưởng của độ phân giải đầu vào.
+
+Dùng `--datasets Z24 --z24-full-sensors` để giữ tất cả các trục gia tốc kết cấu và năm kênh tham chiếu cố định. Danh sách kênh được chốt từ file healthy train. Khi bỏ một điểm đo, tất cả các trục tại đó cùng bị che. Điều kiện clean giữ đúng những trục có sẵn trong bản ghi. Log mask ghi riêng kênh thiếu sẵn và các điểm đo bị bỏ trong thí nghiệm.
 
 Đọc `paired_summary.csv` để xác định metric nào giảm khi mất sensor, CLMM-Net bù được bao nhiêu, và khối nào tạo ra chênh lệch. Dùng `mask_variability.csv` để xem độ nhạy với từng mask. So recall cùng FPR ở ngưỡng validation. Recall chẩn đoán tại giới hạn FPR là chỉ số đọc từ ROC test. Độ lệch chuẩn qua ba seed mô tả mức biến động trên split và bộ mask cố định.
