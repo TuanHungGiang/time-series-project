@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Compare zero-fill PCA-SPE, observed-only projection, and healthy subset refits under matched sensor loss on both bridges.
+
 - Add a full-response 1,024-point PCA-SPE benchmark and figures explaining paired ranking and threshold-dependent alarm changes through 90% whole-device loss.
 
 - Plot test decisions relative to validation thresholds, alarm transitions by damage state, and the sampled Z24 scores underlying selected record decisions.
