@@ -14,9 +14,25 @@ median AUC change, alarm changes along the fixed clean-threshold then
 recalibrated-threshold path, and changes by damage state. These diagnostics
 describe score and decision changes on the fixed cohorts.
 
+Run the follow-up with
+`python -m clmm_timesnet.pca_observed_sensor_comparison --z24 <input> --hell <h5> --out <folder>`.
+All three methods use the original splits, 1,024-point windows, nested masks and
+healthy training data. The two alternatives calculate residual energy per
+observed dimension using a restricted full basis or an exact subset refit.
+The full-basis healthy reference sets the shared score scale within each
+measurement group. The original clean Z24 validation tail is fixed across
+methods, and the upper-tail analysis is also exported. Thresholds are compared
+under both the clean-frozen and mask-matched healthy validation policies.
+Reports include paired mask-level deltas, AUC by damage state, and an AUC figure.
+
 ## Tiếng Việt
 
 Chạy bộ kiểm tra PCA-SPE ở 1.024 điểm trên hai cầu bằng lệnh đầu, hoặc đưa ZIP
 kết quả đã có vào lệnh thứ hai để vẽ lại. Hình xuất PNG và PDF kèm CSV.
 Phân tích recall và F1 dùng ba điểm đối chiếu: đủ cảm biến với ngưỡng clean,
 mất cảm biến với ngưỡng clean, rồi mất cảm biến với ngưỡng hiệu chỉnh.
+
+Lệnh phân tích tiếp theo đối chiếu cách điền 0 với phép chiếu chỉ dùng kênh còn đo
+và PCA fit lại trên đúng nhóm kênh đó. Ba cách dùng chung split, cửa sổ 1.024
+điểm, mask và dữ liệu healthy train. Kết quả gồm chênh lệch theo từng mask,
+AUC theo trạng thái hư hỏng và biểu đồ AUC cho hai cầu.
