@@ -17,7 +17,6 @@ from clmm_timesnet.data.masking import sensor_mask, stable_rng
 from clmm_timesnet.data.prepare_hellbridge import main as prepare_hellbridge
 from clmm_timesnet.data.z24 import load_manifest, read_stable_vertical, split_training_windows
 from clmm_timesnet.metrics import publication_metrics, threshold_from_healthy
-from clmm_timesnet.z24_full_sensors import Layout, response_labels
 
 
 POINTS = 1024
@@ -86,6 +85,14 @@ class PCASPE:
             np.testing.assert_allclose(score(keep)[:len(sample)], expected, atol=.006, rtol=.001)
         return score
 
+    def score_columns(self, raw, present):
+        score = self.terms(raw)
+
+        def columns(keep):
+            return {"spe_score": score(keep)}
+
+        return columns
+
 
 def read_z24_windows(path, layout, labels):
     present = np.array([name in labels for name in layout.channels], dtype=bool)
@@ -111,21 +118,25 @@ def mask_summary(names, channel_sites, present, keep):
     )
 
 
-def fit_z24_group(train, group_name):
+def fit_z24_group(train, group_name, detector_cls=PCASPE):
+    from clmm_timesnet.z24_full_sensors import Layout, response_labels
+
     paths = [Path(path) for path in train.path]
     labels = [response_labels(p) for p in paths]
     layout = Layout.from_training(labels)
     fit, reference = split_training_windows([
         read_z24_windows(p, layout, available)[0] for p, available in zip(paths, labels, strict=True)
     ])
-    detector = PCASPE(select_windows(fit), select_windows(reference))
+    detector = detector_cls(select_windows(fit), select_windows(reference))
     metadata = dict(dataset="Z24", group=group_name, channels=list(layout.channels),
                     sensors=list(layout.sites), fit_records=train.record_id.tolist(),
                     pca_components=int(detector.model.n_components_))
     return layout, detector, metadata
 
 
-def z24_scores(root):
+def z24_scores(root, detector_cls=PCASPE):
+    from clmm_timesnet.z24_full_sensors import response_labels
+
     manifest = load_manifest(root)
     if manifest.record_id.duplicated().any():
         raise ValueError("Z24: duplicate records")
@@ -138,19 +149,20 @@ def z24_scores(root):
     all_scores, masks, inventory = [], [], []
     for (setup, exc), group in manifest.groupby(["setup", "excitation"], sort=True):
         group_name = f"{setup:02d}/{exc.upper()}"
-        layout, detector, metadata = fit_z24_group(group.loc[group.split.eq("train")], group_name)
+        layout, detector, metadata = fit_z24_group(group.loc[group.split.eq("train")], group_name, detector_cls)
         inventory.append(metadata)
         print(f"Z24 {group_name} | {len(layout.sites)} sensors, {len(layout.channels)} channels", flush=True)
         for row in group.loc[group.split.isin(["val", "test"])].itertuples():
             p = Path(row.path)
             raw, present = read_z24_windows(p, layout, response_labels(p))
-            score = detector.terms(select_windows(raw))
+            score = detector.score_columns(select_windows(raw), present)
             base = dict(dataset="Z24", group=group_name, split=row.split, sample_id=row.record_id,
                         record_id=row.record_id, state=str(row.state), label=row.label)
             for rate in RATES if row.split == "test" or row.label == 0 else (0,):
                 for replicate in (0,) if rate == 0 else range(1, REPLICATES + 1):
                     keep = nested_keep(layout.site_of_axis, present, row.record_id, rate, replicate)
-                    all_scores.append(dict(**base, loss=rate, replicate=replicate, spe_score=float(np.median(score(keep)))))
+                    scores = {name: float(np.median(values)) for name, values in score(keep).items()}
+                    all_scores.append(dict(**base, loss=rate, replicate=replicate, **scores))
                     masks.append(dict(dataset="Z24", key=row.record_id, loss=rate, replicate=replicate,
                                       **mask_summary(layout.sites, layout.site_of_axis, present, keep)))
     return pd.DataFrame(all_scores), masks, inventory
@@ -167,7 +179,7 @@ def hell_axes(record):
     return tuple(channels)
 
 
-def hell_scores(h5_path, out):
+def hell_scores(h5_path, out, detector_cls=PCASPE):
     split = out / "hellbridge_split"
     prepare_hellbridge([
         "--h5", str(h5_path), "--output-dir", str(split), "--profile", "svendsen2022",
@@ -194,18 +206,18 @@ def hell_scores(h5_path, out):
             for j, (field, sensor, axis) in enumerate(axes):
                 full = np.asarray(group[field][sensor][axis], dtype=np.float32)
                 raw[rows.index, j] = detrend(full[sample_idx], axis=-1, type="linear")
-    detector = PCASPE(raw[fit], raw[reference])
+    detector = detector_cls(raw[fit], raw[reference])
     idx = np.r_[calibration, test]
-    score = detector.terms(raw[idx])
+    present = np.ones(len(axes), dtype=bool)
+    score = detector.score_columns(raw[idx], present)
     meta = manifest.loc[idx, ["sample_id", "record_id", "state", "label"]].reset_index(drop=True)
     meta = meta.assign(dataset="HellBridge", group="P2_NM_Z",
                        split=np.where(np.arange(len(idx)) < len(calibration), "val", "test"))
-    present = np.ones(len(axes), dtype=bool)
     all_scores, masks = [], []
     for rate in RATES:
         for replicate in (0,) if rate == 0 else range(1, REPLICATES + 1):
             keep = nested_keep(sites, present, "HellBridge/P2_NM_Z", rate, replicate)
-            all_scores.append(meta.assign(loss=rate, replicate=replicate, spe_score=score(keep)))
+            all_scores.append(meta.assign(loss=rate, replicate=replicate, **score(keep)))
             masks.append(dict(dataset="HellBridge", key="P2_NM_Z", loss=rate, replicate=replicate,
                               **mask_summary(names, sites, present, keep)))
     inventory = [dict(dataset="HellBridge", group="P2_NM_Z",
@@ -221,13 +233,13 @@ def pair_credit(y, values):
     return (diff > 0).astype(float) + .5 * (diff == 0)
 
 
-def measure(data, name):
+def measure(data, name, prior_sign=None):
     is_z24 = name == "Z24"
     validation = data.loc[data.split.eq("val") & data.loss.eq(0)]
     clean_validation_auc = roc_auc_score(validation.label, validation.spe_score) if is_z24 else None
     # Preserve the previous locked Z24 validation protocol and also report
     # the conventional healthy-only upper-tail direction for comparison.
-    val_sign = -1 if is_z24 and clean_validation_auc < .5 else 1
+    val_sign = prior_sign if prior_sign is not None else (-1 if is_z24 and clean_validation_auc < .5 else 1)
     orientations = {"upper": 1, "prior_protocol": val_sign}
     cal = data.loc[data.split.eq("val") & data.label.eq(0)]
     trials = data.loc[data.split.eq("test")]
