@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 
-from IPython.display import FileLink, display
+from IPython.display import FileLink, Image, display
 import pandas as pd
 import torch
 
@@ -34,8 +34,8 @@ def checkout(name, commit):
     return path
 
 
-repo = checkout("clmm", "d732e06b2e3670d6b1f22ec6939234d642d5d8d1")
-archive = checkout("baseline_source", "9f6e24b785e51462c5bfc93e2a06d8ca0df1e2df")
+repo = checkout("clmm", "4d42efefe907a4d8d6598986b3076a52fd40a89a")
+archive = checkout("baseline_source", "79ae19086f2e037e84a686ec2b646d8fb44a909d")
 try:
     from torch_geometric.nn import GATConv
 except ImportError:
@@ -48,12 +48,33 @@ env = os.environ.copy()
 env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(repo / "src"), env.get("PYTHONPATH"))))
 env["OMP_NUM_THREADS"] = "2"
 env["OPENBLAS_NUM_THREADS"] = "2"
-subprocess.run([
+env["CLMM_LOG_EACH_EPOCH"] = "1"
+command = [
     sys.executable, "-u", "-m", "clmm_timesnet.matched_baselines_kaggle",
     "--z24-root", str(Z24), "--hell-h5", str(HELL),
     "--baseline-dir", str(archive / "research/mdr_shm_kaggle"),
     "--output-dir", str(OUT),
-], cwd=WORK, env=env, check=True)
+]
+OUT.mkdir(parents=True, exist_ok=True)
+log_path = OUT / "training.log"
+with log_path.open("a", encoding="utf-8") as log, subprocess.Popen(
+    command, cwd=WORK, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    text=True, encoding="utf-8", errors="replace", bufsize=1,
+) as process:
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        log.write(line)
+        log.flush()
+    if process.wait():
+        raise subprocess.CalledProcessError(process.returncode, command)
+
+if "epoch=" in log_path.read_text(encoding="utf-8"):
+    subprocess.run([
+        sys.executable, "-m", "clmm_timesnet.matched_baseline_loss_curves", str(log_path),
+        "--output-dir", str(OUT),
+    ], cwd=WORK, env=env, check=True)
+    for figure in sorted(OUT.glob("training_loss_*.png")):
+        display(Image(filename=str(figure)))
 
 table = pd.read_csv(OUT / "summary_mean_sd.csv")
 table = table.loc[table["policy"].eq("mask_matched")]
