@@ -14,6 +14,13 @@ median AUC change, alarm changes along the fixed clean-threshold then
 recalibrated-threshold path, and changes by damage state. These diagnostics
 describe score and decision changes on the fixed cohorts.
 
+Run `python -m clmm_timesnet.pca_sensor_loss_visuals --report <folder-or-zip> --z24 <input> --out <folder> --focus 50`
+to generate eight PNG and PDF figures. The Z24 native files are used for isolated
+physical-location removals, waveform examples, and a comparison of shared and
+independent masks with a common sensor pool and common pair denominator.
+Sites 431 and 441 are retained in the mask-design comparison where available.
+All raw-data checks reuse the benchmark's healthy fit and clean score direction.
+
 Run the follow-up with
 `python -m clmm_timesnet.pca_observed_sensor_comparison --z24 <input> --hell <h5> --out <folder>`.
 All three methods use the original splits, 1,024-point windows, nested masks and
@@ -48,6 +55,10 @@ Chạy bộ kiểm tra PCA-SPE ở 1.024 điểm trên hai cầu bằng lệnh �
 kết quả đã có vào lệnh thứ hai để vẽ lại. Hình xuất PNG và PDF kèm CSV.
 Phân tích recall và F1 dùng ba điểm đối chiếu: đủ cảm biến với ngưỡng clean,
 mất cảm biến với ngưỡng clean, rồi mất cảm biến với ngưỡng hiệu chỉnh.
+
+Lệnh trực quan hóa xuất tám hình PNG và PDF. Phần Z24 kiểm tra bỏ từng vị trí,
+so sánh hai cách tạo mask trên cùng nhóm cảm biến và minh họa dạng sóng cùng
+phần đóng góp vào lỗi tái tạo của vị trí 431 và 441.
 
 Lệnh phân tích tiếp theo đối chiếu cách điền 0 với phép chiếu chỉ dùng kênh còn đo
 và PCA fit lại trên đúng nhóm kênh đó. Ba cách dùng chung split, cửa sổ 1.024
