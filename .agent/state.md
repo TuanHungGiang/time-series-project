@@ -1,5 +1,7 @@
 # Current research state
 
+The PCA-SPE visual report reuses both bridge benchmarks and isolates the mechanics of Z24 rank reversals. It adds a common-versus-independent mask experiment with a shared sensor pool, single-location removals, and waveform and residual attribution for sites 431 and 441.
+
 The Z24 Welch power ablation reuses the original bands, windows, splits and masks. It compares centered spectral shape, absolute log-band power, power level alone and time-domain controls. Matched validation AUC is reported separately from test metrics. See `experiments/pca_sensor_loss_1024/notes.md`.
 
 The Z24 spectral follow-up compares native time-domain inputs against 32 Welch bands between 0.5 and 30 Hz with the same observed-channel PCA-SPE scorer. It retains the original splits and sensor mask schedules, and reports paired AUC differences and changes relative to the clean AUC gap. Real-data results are pending. See `experiments/pca_sensor_loss_1024/notes.md`.
