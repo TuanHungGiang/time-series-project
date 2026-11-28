@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an eight-figure PCA-SPE sensor-loss report with Z24 single-location and matched-mask audits.
+
 - Isolate mean Welch log power in the locked Z24 sensor-loss protocol and export matched validation and test AUC.
 
 - Add a matched Z24 comparison of native samples and Welch spectral shape under whole-sensor loss.
